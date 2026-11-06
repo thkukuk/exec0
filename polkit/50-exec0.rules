@@ -1,0 +1,36 @@
+/* users in the exec0_nopasswd list don't need to enter a password.
+ * users that are in the wheel group always authenticate with their
+ * own password. The other users need to provide the root password.
+ * This matches sudo-policy-auth-wheel-self */
+
+/* The _exec0_nopasswd variable specifies the users who don't need
+ * a password to run "exec0". To configure the list of users, create 
+ * a file "/etc/polkit-1/rules.d/51-exec0-nopasswd.rules" with the
+ * content:
+ * polkit._exec0_nopasswd.push("user1","user2",...); */
+polkit._exec0_nopasswd = [];
+
+/* The variable _exec0_admin_group specifies the admin group in which
+ * users must authenticate with their own password, while the others
+ * must specify the root password. To change the group, create a file
+ * "/etc/polkit-1/rules.d/51-exec0-admin-group.rules" with e.g. the
+ * following content:
+ * polkit._exec0_admin_group = "admin"; */
+polkit._exec0_admin_group = "wheel";
+polkit.addRule(function(action, subject) {
+    if (action.id == "io.systemd.PTYBroker.acquire-pty-with-shell") {
+        for (var i in polkit._exec0_nopasswd) {
+            var g = polkit._exec0_nopasswd[i];
+            if (subject.user == g) {
+                return polkit.Result.YES;
+            }
+        }
+    }
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+	subject.isInGroup(polkit._exec0_admin_group)) {
+        return polkit.Result.AUTH_SELF_KEEP;
+    }
+    if (action.id == "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+});
