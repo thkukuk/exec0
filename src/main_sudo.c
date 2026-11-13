@@ -11,14 +11,13 @@
 #include <unistd.h>
 
 #include "basics.h"
-#include "main_sudo.h"
-#include "pathlookup.h"
+#include "main.h"
 #include "ptybroker.h"
 
 static void
-usage_sudo(FILE *f)
+usage_sudo(FILE *fp)
 {
-  fprintf(f,
+  fprintf(fp,
 	  "usage: sudo [-u user] [-g group] [-i | -s] [-H] [-E | --preserve-env=list]\n"
 	  "            [-D directory] [-n] [VAR=value]... [COMMAND [ARGUMENT...]]\n"
 	  "usage: sudo -h | -V | -v | -k | -K\n");
@@ -45,80 +44,6 @@ help_sudo(void)
 	 "  -v, --validate              accepted for compatibility, without effect\n");
 }
 
-/* Appends 'name' to the comma-separated list in '*list' (which may be NULL), growing it as needed. */
-static int
-whitelist_add(char **list, const char *name)
-{
-  char *tmp;
-
-  if (*list)
-    {
-      if (asprintf(&tmp, "%s,%s", *list, name) < 0)
-	return -ENOMEM;
-    }
-  else
-    {
-      tmp = strdup(name);
-      if (!tmp)
-	return -ENOMEM;
-    }
-
-  free(*list);
-  *list = tmp;
-  return 0;
-}
-
-/* Like sudo(1)'s is_envar: a leading identifier (as a shell or getenv(3) would accept) followed
-   by '=' marks 'arg' as a VAR=value assignment rather than the start of the command line. */
-static bool
-is_env_assignment(const char *arg)
-{
-  if (!(isalpha((unsigned char) arg[0]) || arg[0] == '_'))
-    return false;
-
-  const char *p = arg + 1;
-  while (*p && *p != '=')
-    {
-      if (!isalnum((unsigned char) *p) && *p != '_')
-	return false;
-      p++;
-    }
-
-  return *p == '=';
-}
-
-/* Joins 'args' (a NULL-terminated argv tail) into a single string suitable for "shell -c STRING",
-   quoting any shell metacharacters by backslash-escaping them. Mirrors parse_args.c's handling of
-   "sudo -s/-i COMMAND ARGS..." in the reference sudo implementation. */
-static char *
-quote_shell_command(char **args)
-{
-  size_t size = 1; /* trailing NUL */
-  for (char **a = args; *a; a++)
-    size += strlen(*a) * 2 + 1; /* worst case: every byte escaped, plus a separating space */
-
-  char *cmnd = malloc(size);
-  if (!cmnd)
-    return NULL;
-
-  char *dst = cmnd;
-  for (char **a = args; *a; a++)
-    {
-      for (const char *s = *a; *s; s++)
-	{
-	  if (!isalnum((unsigned char) *s) && *s != '_' && *s != '-' && *s != '$')
-	    *dst++ = '\\';
-	  *dst++ = *s;
-	}
-      *dst++ = ' ';
-    }
-  if (dst != cmnd)
-    dst--; /* replace the trailing separator with the terminating NUL */
-  *dst = '\0';
-
-  return cmnd;
-}
-
 /* Emulates sudo(1)'s command line and defaults as closely as reasonably possible on top of exec0's
    PTYBroker plumbing: authentication (via polkit) and environment/session handling are the broker's
    job (see acquire_shell_pty() and build_environment() in ptybroker.c); what's left to do here is
@@ -136,7 +61,7 @@ main_sudo(int argc, char *argv[])
   _cleanup_free_ char *argv0 = NULL;
   _cleanup_free_ char *quoted_cmnd = NULL;
   _cleanup_free_ char *whitelist = NULL;
-  Exec0Args args = {};
+  config_t args = {};
   char *opt_user = "root";
   char *opt_preserve_list = NULL;
   bool opt_login = false;
@@ -149,9 +74,16 @@ main_sudo(int argc, char *argv[])
   struct passwd *pw;
   unsigned n;
   int r;
+  econf_err cfg_err;
 
   if (argc < 1)
     return -EINVAL;
+
+  /* Load /etc/exec0/sudo.conf (or /usr/share/exec0/sudo.conf) first, so its settings act as
+     defaults that the command line parsed below can still override. */
+  cfg_err = read_config("sudo", &args);
+  if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
+    fprintf(stderr, "sudo: failed to read configuration: %s\n", econf_errString(cfg_err));
 
   for (n = 1; n < (unsigned) argc; n++)
     {
@@ -385,19 +317,15 @@ main_sudo(int argc, char *argv[])
   if (opt_login && !args.chdir)
     args.chdir = pw->pw_dir;
 
-  /* sudo(1) runs a shell, rather than executing PROGRAM directly, for -i and -s. Unlike sudo(1),
-     there is no "implied shell" for a command-less invocation in general: that case was already
-     rejected above unless the only thing left on the command line was a VAR=value assignment (no
-     -i/-s either), in which case falling through to run_pty_session() with no command line lets the
-     broker apply its own default (the target user's login shell), the same way plain exec0 does. */
+  /* sudo(1) runs a shell, rather than executing PROGRAM directly, for -i and -s. Unlike sudo(1), there
+     is no "implied shell" for a command-less invocation in general: that case was already rejected
+     above unless the only thing left on the command line was a VAR=value assignment (no -i/-s either),
+     in which case fall through to the same shell-building code below as -s, i.e. a non-login shell. */
   bool run_shell = opt_login || opt_shell_mode;
 
   char **cmdline;
 
-  if (!run_shell && !have_cmd)
-    return run_pty_session(&args, NULL);
-
-  if (run_shell)
+  if (run_shell || !have_cmd)
     {
       _cleanup_free_ char *resolved_shell = NULL;
       char *shell;

@@ -3,17 +3,16 @@
 #include "config.h"
 
 #include <errno.h>
-#include <getopt.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "basics.h"
-#include "main_sudo.h"
-#include "pathlookup.h"
+#include "main.h"
 #include "ptybroker.h"
 
 // Looks up 'program' in $PATH, the way a shell (or execvp(3)) would.
@@ -42,414 +41,428 @@ find_program_in_path(const char *program)
   return NULL;
 }
 
-static void
-help_pkexec(void)
+// Environment variables always start with a letter, can contain '_' and end with '='
+bool
+is_env_assignment(const char *arg)
 {
-  printf("pkexec --version |\n"
-	 "       --help |\n"
-	 "       --disable-internal-agent |\n"
-	 "       [-v | --verbose] [--keep-cwd] [--user username] [PROGRAM] [ARGUMENTS...]\n");
+  if (!(isalpha((unsigned char) arg[0]) || arg[0] == '_'))
+    return false;
+
+  const char *p = arg + 1;
+  while (*p && *p != '=')
+    {
+      if (!isalnum((unsigned char) *p) && *p != '_')
+        return false;
+      p++;
+    }
+
+  return *p == '=';
 }
 
-/* Emulates pkexec(1)'s command line and defaults as closely as possible, but on top of exec0's PTYBroker
-   plumbing: acquire_shell_pty() already takes care of authentication (a pkttyagent is spawned on our
-   terminal so the broker's polkit check can prompt for a password, see polkit_agent_open()) and of the
-   environment handed to the session (see build_environment() in ptybroker.c). What's left to do here is
-   turning pkexec's own command line into the equivalent exec0 request: who to run as, where to start, and
-   what to run. */
-static int
-main_pkexec(int argc, char *argv[])
+// Checks whether 'arg' is a valid comma-separated list of environment variable names, as accepted
+// by --preserve-env's optional argument (e.g. "PATH,HOME").
+bool
+is_env_list(const char *arg)
 {
-  _cleanup_free_ char *resolved_path = NULL;
-  _cleanup_free_ char *chdir_home = NULL;
-  Exec0Args args = {};
-  char *opt_user = "root";
-  bool opt_keep_cwd = false;
-  char **cmdline = NULL;
-  struct passwd *pw;
-  unsigned n;
-  int r;
+  if (isempty(arg))
+    return false;
 
-  if (argc < 1)
-    return -EINVAL;
-
-  for (n = 1; n < (unsigned) argc; n++)
+  const char *p = arg;
+  while (*p)
     {
-      if (streq(argv[n], "--help"))
-	{
-	  help_pkexec();
-	  return 0;
-	}
-      else if (streq(argv[n], "--version"))
-	{
-	  printf("pkexec (%s) %s\n", PACKAGE, VERSION);
-	  return 0;
-	}
-      else if (streq(argv[n], "--user") || streq(argv[n], "-u"))
-	{
-	  n++;
-	  if (n >= (unsigned) argc)
-	    {
-	      help_pkexec();
-	      return -EINVAL;
-	    }
-	  opt_user = argv[n];
-	}
-      else if (streq(argv[n], "--disable-internal-agent"))
-	{
-	  /* Our internal agent is always a best-effort pkttyagent spawned for this very process (see
-	     polkit_agent_open()); there currently is nothing to disable, but the flag is accepted for
-	     command-line compatibility. */
-	}
-      else if (streq(argv[n], "--keep-cwd"))
-	opt_keep_cwd = true;
-      else if (streq(argv[n], "-v") || streq(argv[n], "--verbose"))
-	args.verbose = true;
-      else
-	break;
+      if (!(isalpha((unsigned char) *p) || *p == '_'))
+        return false;
+      p++;
+
+      while (*p && *p != ',')
+        {
+          if (!isalnum((unsigned char) *p) && *p != '_')
+            return false;
+          p++;
+        }
+
+      if (*p == ',')
+        p++;
     }
 
-  errno = 0;
-  pw = getpwnam(opt_user);
-  if (!pw)
-    {
-      r = errno?-errno:-ENOENT;
-      fprintf(stderr, "User `%s' does not exist.\n", opt_user);
-      return r;
-    }
-
-  /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,
-     unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that build_environment()
-     in ptybroker.c will clobber via its own getpwuid() call. */
-  args.user = opt_user;
-
-  /* Like pkexec, default to the target user's home directory; --keep-cwd keeps ours (exec0's own default,
-     see working_directory_to_json() in ptybroker.c). */
-  if (!opt_keep_cwd)
-    {
-      chdir_home = strdup(pw->pw_dir);
-      if (!chdir_home)
-	{
-	  fprintf(stderr, "Out of memory.\n");
-	  return -ENOMEM;
-	}
-      args.chdir = chdir_home;
-    }
-
-  /* Anything left over is PROGRAM [ARGUMENTS...]; if there is none, leave cmdline NULL so the broker runs
-     the target user's login shell, same as plain exec0 does for the caller's own shell. */
-  if (n < (unsigned) argc)
-    {
-      char *path = argv[n];
-
-      if (path[0] != '/')
-	{
-	  resolved_path = find_program_in_path(path);
-	  if (!resolved_path)
-	    {
-	      fprintf(stderr, "Cannot run program %s: %s\n", path, strerror(ENOENT));
-	      return -ENOENT;
-	    }
-	  path = resolved_path;
-	}
-
-      if (access(path, F_OK) != 0)
-	{
-	  r = -errno;
-	  fprintf(stderr, "Error accessing %s: %s\n", path, strerror(-r));
-	  return r;
-	}
-
-      argv[n] = path;
-      cmdline = argv + n;
-    }
-
-  return run_pty_session(&args, cmdline);
+  return true;
 }
 
-static void
-help_su(void)
+// Appends 'name' to the comma-separated list in '*list' (which may be NULL), growing it as needed.
+int
+whitelist_add(char **list, const char *name)
 {
-  printf("su [options] [-] [<user> [<argument>...]]\n\n"
-	 "Change the effective user ID and group ID to that of <user>, via PTYBroker.\n"
-	 "A mere - implies --login. If <user> is not given, root is assumed.\n\n"
-	 "  -c, --command <command>              pass <command> to the shell with -c\n"
-	 "      --session-command <command>      same as -c\n"
-	 "  -f, --fast                           pass -f to the shell\n"
-	 "  -g, --group <group>                  specify the primary group\n"
-	 "  -, -l, --login                       make the shell a login shell\n"
-	 "  -m, -p, --preserve-environment       do not reset environment variables\n"
-	 "  -s, --shell <shell>                  run <shell> instead of the target user's default\n"
-	 "  -w, --whitelist-environment <list>   forward the given, comma-separated variables\n"
-	 "  -P, --pty, -T, --no-pty              accepted for compatibility, without effect\n"
-	 "  -v, --verbose                        show additional information\n"
-	 "  -h, --help                           show this help\n"
-	 "  -V, --version                        show version\n");
-}
+  char *tmp;
 
-/* Emulates su(1)'s command line and defaults as closely as reasonably possible using PTYBroker.
-   Authentication, environment handling and session setup are the broker's (and polkit's) job, what's
-   left to do here is turning su's own command line into the equivalent PTYBroker request. su normally
-   only forwards a small, curated environment (--preserve-environment / --whitelist-environment).
-   su's -G/--supp-group has no equivalent: the PTYBroker only lets the shell backend run as a single,
-   given primary group, not a list of supplementary ones. */
-static int
-main_su(int argc, char *argv[])
-{
-  _cleanup_free_ char *resolved_shell = NULL;
-  _cleanup_free_ char *chdir_home = NULL;
-  Exec0Args args = {};
-  char *opt_user = "root";
-  char *opt_shell = NULL;
-  char *opt_command = NULL;
-  bool opt_login = false;
-  bool opt_fast = false;
-  struct passwd *pw;
-  unsigned n;
-  int r;
-
-  if (argc < 1)
-    return -EINVAL;
-
-  for (n = 1; n < (unsigned) argc; n++)
+  if (*list)
     {
-      if (streq(argv[n], "--help"))
-	{
-	  help_su();
-	  return 0;
-	}
-      else if (streq(argv[n], "--version"))
-	{
-	  printf("su (%s) %s\n", PACKAGE, VERSION);
-	  return 0;
-	}
-      else if (streq(argv[n], "-") || streq(argv[n], "-l") || streq(argv[n], "--login"))
-	opt_login = true;
-      else if (streq(argv[n], "-f") || streq(argv[n], "--fast"))
-	opt_fast = true;
-      else if (streq(argv[n], "-m") || streq(argv[n], "-p") || streq(argv[n], "--preserve-environment"))
-	args.preserve_environment = true;
-      else if (streq(argv[n], "-c") || streq(argv[n], "--command") || streq(argv[n], "--session-command"))
-	{
-	  n++;
-	  if (n >= (unsigned) argc)
-	    {
-	      help_su();
-	      return -EINVAL;
-	    }
-	  opt_command = argv[n];
-	}
-      else if (streq(argv[n], "-s") || streq(argv[n], "--shell"))
-	{
-	  n++;
-	  if (n >= (unsigned) argc)
-	    {
-	      help_su();
-	      return -EINVAL;
-	    }
-	  opt_shell = argv[n];
-	}
-      else if (streq(argv[n], "-g") || streq(argv[n], "--group"))
-	{
-	  n++;
-	  if (n >= (unsigned) argc)
-	    {
-	      help_su();
-	      return -EINVAL;
-	    }
-	  args.group = argv[n];
-	}
-      else if (streq(argv[n], "-w") || streq(argv[n], "--whitelist-environment"))
-	{
-	  n++;
-	  if (n >= (unsigned) argc)
-	    {
-	      help_su();
-	      return -EINVAL;
-	    }
-	  args.whitelist_env = argv[n];
-	}
-      else if (streq(argv[n], "-P") || streq(argv[n], "--pty") ||
-	       streq(argv[n], "-T") || streq(argv[n], "--no-pty"))
-	/* exec0 always proxies a pty allocated by the broker; nothing to toggle. */
-	;
-      else if (streq(argv[n], "-v") || streq(argv[n], "--verbose"))
-	args.verbose = true;
-      else if (streq(argv[n], "-G") || streq(argv[n], "--supp-group"))
-	{
-	  fprintf(stderr, "su: supplementary groups are not supported via the PTYBroker.\n");
-	  return -EOPNOTSUPP;
-	}
-      else if (argv[n][0] == '-' && argv[n][1] != '\0')
-	{
-	  fprintf(stderr, "su: unrecognized option '%s'\n"
-		  "Try 'su --help' for more information.\n", argv[n]);
-	  return -EINVAL;
-	}
-      else
-	break; /* first non-option argument: the target user */
+      if (asprintf(&tmp, "%s,%s", *list, name) < 0)
+        return -ENOMEM;
     }
-
-  if (n < (unsigned) argc)
-    opt_user = argv[n++];
-
-  /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,
-     unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that build_environment()
-     in ptybroker.c will clobber via its own getpwuid() call. */
-  args.user = opt_user;
-
-  errno = 0;
-  pw = getpwnam(opt_user);
-  if (!pw)
-    {
-      r = errno ? -errno : -ENOENT;
-      fprintf(stderr, "su: user %s does not exist\n", opt_user);
-      return r;
-    }
-
-  /* Unlike pkexec, su by default stays in the caller's current directory (exec0's own default, see
-     working_directory_to_json() in ptybroker.c); only --login switches to the target user's home, same as
-     pkexec always does. */
-  if (opt_login)
-    {
-      chdir_home = strdup(pw->pw_dir);
-      if (!chdir_home)
-	{
-	  fprintf(stderr, "Out of memory.\n");
-	  return -ENOMEM;
-	}
-      args.chdir = chdir_home;
-    }
-
-  char *shell = opt_shell ?: ((pw->pw_shell && pw->pw_shell[0]) ? pw->pw_shell : "/bin/sh");
-  if (shell[0] != '/')
-    {
-      resolved_shell = find_program_in_path(shell);
-      if (!resolved_shell)
-	{
-	  fprintf(stderr, "su: cannot run shell %s: %s\n", shell, strerror(ENOENT));
-	  return -ENOENT;
-	}
-      shell = resolved_shell;
-    }
-  if (access(shell, X_OK) != 0)
-    {
-      r = -errno;
-      fprintf(stderr, "su: error accessing %s: %s\n", shell, strerror(-r));
-      return r;
-    }
-
-  /* Like run_shell() in util-linux's su(1): the broker executes 'executable' directly (see the 'executable'
-     field in Exec0Args / "executable" in ptybroker.c), while the first element of 'commandLine' is only ever
-     used as argv[0], so login-shell semantics are requested the same way su does it, by prefixing argv[0]
-     with a dash. */
-  args.executable = shell;
-
-  _cleanup_free_ char *argv0 = NULL;
-  if (opt_login)
-    r = asprintf(&argv0, "-%s", basename(shell));
   else
     {
-      argv0 = strdup(basename(shell));
-      r = argv0 ? 0 : -1;
-    }
-  if (r < 0)
-    {
-      fprintf(stderr, "Out of memory.\n");
-      return -ENOMEM;
+      tmp = strdup(name);
+      if (!tmp)
+        return -ENOMEM;
     }
 
-  size_t n_additional = (unsigned) argc - n;
-  size_t n_cmdline = 1 + opt_fast + (opt_command ? 2 : 0) + n_additional + 1;
-  _cleanup_free_ char **cmdline = calloc(n_cmdline, sizeof(char *));
-  if (!cmdline)
-    {
-      fprintf(stderr, "Out of memory.\n");
-      return -ENOMEM;
-    }
+  free(*list);
+  *list = tmp;
+  return 0;
+}
 
-  size_t i = 0;
-  cmdline[i++] = argv0;
-  if (opt_fast)
-    cmdline[i++] = (char *) "-f";
-  if (opt_command)
-    {
-      cmdline[i++] = (char *) "-c";
-      cmdline[i++] = opt_command;
-    }
-  for (size_t j = 0; j < n_additional; j++)
-    cmdline[i++] = argv[n + j];
-  cmdline[i] = NULL;
+/* Joins 'args' (a NULL-terminated argv tail) into a single string suitable for "shell -c STRING",
+   quoting any shell metacharacters by backslash-escaping them. */
+char *
+quote_shell_command(char **args)
+{
+  size_t size = 1; /* trailing NUL */
+  for (char **a = args; *a; a++)
+    size += strlen(*a) * 2 + 1; /* worst case: every byte escaped, plus a separating space */
 
-  return run_pty_session(&args, cmdline);
+  char *cmd = malloc(size);
+  if (!cmd)
+    return NULL;
+
+  char *dst = cmd;
+  for (char **a = args; *a; a++)
+    {
+      for (const char *s = *a; *s; s++)
+        {
+          if (!isalnum((unsigned char) *s) && *s != '_' && *s != '-' && *s != '$')
+            *dst++ = '\\';
+          *dst++ = *s;
+        }
+      *dst++ = ' ';
+    }
+  if (dst != cmd)
+    dst--; /* replace the trailing separator with the terminating NUL */
+  *dst = '\0';
+
+  return cmd;
+}
+
+static void
+usage_exec0(FILE *fp)
+{
+  fprintf(fp,
+	  "exec0 [-u user] [-g group] [-i | -s] [-E] [-D path] [VAR=value]... [COMMAND [ARGUMENT...]]\n"
+          "exec0 -h | -v | -q | -V\n");
 }
 
 static void
 help_exec0(void)
 {
-  printf("exec0 [OPTIONS...] [-- COMMAND...]\n\n"
-	 "Open a shell (or COMMAND) through systemd-ptybrokerd's Varlink interface.\n\n"
-	 "  -h, --help           Show this help\n"
-	 "  -u, --user <name>    Run as the user \"name\"\n"
-	 "  -g, --group <name>   Run as the group \"name\"\n"
-	 "  -n, --name <name>    Register the PTY allocation under the given name\n"
-	 "  -D, --chdir <patg>   Working directory for the shell (defaults to the current one)\n"
-	 "  -v, --verbose        Show the acquired PTY's name and unit\n"
-	 "  -V, --version        Show version\n");
+  usage_exec0(stdout);
+  printf("\nOpen a shell (or COMMAND) through systemd-ptybrokerd.\n\n"
+         "  -D, --chdir <directory>     Change the working directory before running command\n"
+         "      --description <text>    Set a description for the pty session\n"
+         "  -E, --preserve-env          Preserve user environment when running command\n"
+         "      --preserve-env <list>   Preserve specific, comma-separated environment variables\n"
+         "  -u, --user <user>           Run command as the specified user (default: root)\n"
+         "  -g, --group <group>         Run command as the specified group\n"
+         "  -h, --help                  Display this help message and exit\n"
+         "  -i, --login                 Run a login shell as the target user\n"
+         "      --name <name>           Set the name of the pty session\n"
+         "  -s, --shell                 Run a shell as the target user\n"
+	 "      --background <color>    Set ANSI color for background\n"
+	 "  -q, --quiet                 Be quit, disables verbose settings\n"
+         "  -v, --verbose               Print verbose information\n"
+         "  -V, --version               Show version and exit\n");
 }
 
 static int
 main_exec0(int argc, char *argv[])
 {
-  Exec0Args args = {};
-  char **cmdline = NULL;
+  _cleanup_free_ char *argv0 = NULL;
+  _cleanup_free_ char *quoted_cmd = NULL;
+  _cleanup_free_ char *whitelist = NULL;
+  config_t args = {};
+  bool opt_login = false;
+  bool opt_shell = false;
+  char *opt_preserve_list = NULL;
 
-  static const struct option options[] = {
-    { "help",    no_argument,       NULL, 'h' },
-    { "group",   required_argument, NULL, 'g' },
-    { "user",    required_argument, NULL, 'u' },
-    { "name",    required_argument, NULL, 'n' },
-    { "chdir",   required_argument, NULL, 'D' },
-    { "verbose", no_argument,       NULL, 'v' },
-    { "version", no_argument,       NULL, 'V' },
-    {}
-  };
+  int n;
+  int r;
+  econf_err cfg_err;
 
-  int c;
-  while ((c = getopt_long(argc, argv, "hg:u:n:D:vV", options, NULL)) >= 0)
-    switch (c)
-      {
-      case 'g':
-	args.group = optarg;
-	break;
-      case 'u':
-	args.user = optarg;
-	break;
-      case 'n':
-	args.name = optarg;
-	break;
-      case 'D':
-	args.chdir = optarg;
-	break;
-      case 'h':
-	help_exec0();
-	exit(EXIT_SUCCESS);
-      case 'v':
-	args.verbose = true;
-	break;
-      case 'V':
-	printf("exec0 (%s) %s\n", PACKAGE, VERSION);
-	return 0;
-      default:
-	fprintf(stderr, "Unexpected getopt result '%c'\n", c);
-	return -EINVAL;
-      }
+  if (argc < 1)
+    return -EINVAL;
 
-  /* Anything left over after "--" is the command line to run on the backend side. If none is given
-   * the broker invokes the caller's login shell. */
-  cmdline = optind < argc ? argv + optind : NULL;
+  /* Load /etc/exec0/exec0.conf (or /usr/share/exec0/exec0.conf) first, so its settings act as
+     defaults that the command line parsed below can still override. */
+  cfg_err = read_config("exec0", &args);
+  if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
+    fprintf(stderr, "exec0: failed to read configuration: %s\n", econf_errString(cfg_err));
 
-  return run_pty_session(&args, cmdline);
+  for (n = 1; n < argc; n++)
+    {
+      char *arg = argv[n];
+
+      if (streq(arg, "--"))
+        {
+          n++;
+          break;
+        }
+      else if (streq(arg, "-h") || streq(arg, "--help"))
+        {
+          help_exec0();
+          return 0;
+        }
+      else if (streq(arg, "-V") || streq(arg, "--version"))
+        {
+          printf("exec0 (%s) %s\n", PACKAGE, VERSION);
+          return 0;
+        }
+      else if (streq(arg, "-u") || streq(arg, "--user"))
+        {
+          if (++n >= argc)
+            {
+              fprintf(stderr, "exec0: option requires an argument -- 'u'\n");
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          args.user = argv[n];
+        }
+      else if (strneq(arg, "--user=", 7))
+        args.user = arg + 7;
+      else if (streq(arg, "-g") || streq(arg, "--group"))
+        {
+          if (++n >= argc)
+            {
+              fprintf(stderr, "exec0: option requires an argument -- 'g'\n");
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          args.group = argv[n];
+        }
+      else if (strneq(arg, "--group=", 8))
+        args.group = arg + 8;
+      else if (streq(arg, "-D") || streq(arg, "--chdir"))
+        {
+          if (++n >= argc)
+            {
+              fprintf(stderr, "exec0: option requires an argument -- 'D'\n");
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          args.chdir = argv[n];
+        }
+      else if (strneq(arg, "--chdir=", 8))
+        args.chdir = arg + 8;
+      else if (streq(arg, "-i") || streq(arg, "--login"))
+        opt_login = true;
+      else if (streq(arg, "-s") || streq(arg, "--shell"))
+        opt_shell = true;
+      else if (streq(arg, "-E"))
+        args.preserve_environment = true;
+      else if (streq(arg, "--preserve-env"))
+        {
+          /* Optional argument: take the next word as the list only if it actually looks like
+             one, i.e. contains a comma (bare "--preserve-env" means "preserve everything", same
+             as -E, and must not swallow a single-word COMMAND, e.g. "--preserve-env bash"). A
+             single variable name still works via "--preserve-env=NAME". */
+          if (n + 1 < argc && strchr(argv[n + 1], ',') && is_env_list(argv[n + 1]))
+            opt_preserve_list = argv[++n];
+          else
+            args.preserve_environment = true;
+        }
+      else if (strneq(arg, "--preserve-env=", 15))
+        opt_preserve_list = arg + 15;
+      else if (streq(arg, "-v") || streq(arg, "--verbose"))
+        args.verbose = true;
+      else if (streq(arg, "-q") || streq(arg, "--quiet"))
+        args.verbose = false;
+      else if (streq(arg, "--name"))
+        {
+          if (++n >= argc)
+            {
+              fprintf(stderr, "exec0: option requires an argument -- 'name'\n");
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          args.name = argv[n];
+        }
+      else if (streq(arg, "--description"))
+        {
+          if (++n >= argc)
+            {
+              fprintf(stderr, "exec0: option requires an argument -- 'description'\n");
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          args.description = argv[n];
+        }
+      else if (arg[0] == '-' && arg[1] != '\0')
+        {
+          fprintf(stderr, "exec0: invalid option -- '%s'\n", arg + (arg[1] == '-' ? 2 : 1));
+          usage_exec0(stderr);
+          return -EINVAL;
+        }
+      else
+        break; /* first non-option argument: a VAR=value assignment, or the command */
+    }
+
+  if (opt_login && opt_shell)
+    {
+      fprintf(stderr, "exec0: you may not specify both the -i and -s options\n");
+      usage_exec0(stderr);
+      return -EINVAL;
+    }
+
+  if (opt_login && args.preserve_environment)
+    {
+      fprintf(stderr, "exec0: you may not specify both the -i and -E options\n");
+      usage_exec0(stderr);
+      return -EINVAL;
+    }
+
+  if (opt_preserve_list && opt_preserve_list[0] == '\0')
+    {
+      fprintf(stderr, "exec0: --preserve-env requires a non-empty list\n");
+      usage_exec0(stderr);
+      return -EINVAL;
+    }
+
+  if (opt_preserve_list && !args.preserve_environment)
+    {
+      whitelist = strdup(opt_preserve_list);
+      if (!whitelist)
+        {
+          fprintf(stderr, "Out of memory!\n");
+          return -ENOMEM;
+        }
+    }
+
+  /* Anything left that looks like VAR=value is an environment variable assignment for the command,
+     same as sudo(1): set it in our own environment (so getpwnam()/build_environment() downstream,
+     and -E's "preserve everything" below, pick it up) and, unless the whole environment is already
+     being preserved, whitelist it explicitly so build_environment() forwards it. */
+  while (n < argc && is_env_assignment(argv[n]))
+    {
+      char *eq = strchr(argv[n], '=');
+
+      *eq = '\0';
+      r = setenv(argv[n], eq + 1, 1);
+      if (r == 0 && !args.preserve_environment)
+        r = whitelist_add(&whitelist, argv[n]);
+      *eq = '=';
+      if (r < 0)
+        {
+          fprintf(stderr, "Out of memory!\n");
+          return -ENOMEM;
+        }
+
+      n++;
+    }
+
+  bool have_cmd = n < argc;
+
+  errno = 0;
+  struct passwd *pw = getpwnam(isempty(args.user)?"root":args.user);
+  if (!pw)
+    {
+      r = errno ? -errno : -ENOENT;
+      fprintf(stderr, "User %s does not exist (%s)\n", args.user, strerror(-r));
+      return r;
+    }
+
+  if (args.preserve_environment)
+    args.preserve_environment = true;
+  else if (whitelist)
+    args.whitelist_env = whitelist;
+
+  if (opt_login && !args.chdir)
+    args.chdir = pw->pw_dir;
+
+  /* Plain "exec0" with nothing else given runs a shell, same as "-s": go through the same
+     shell-building code path below so it gets a non-login shell, rather than leaving 'executable'
+     and 'commandLine' both unset, which asks the broker for its own default shell semantics (a
+     login shell). */
+  if (opt_login || opt_shell || !have_cmd)
+    {
+      char *shell;
+
+      if (opt_shell)
+        {
+          char *envshell = getenv("SHELL");
+          shell = !isempty(envshell)?envshell:
+	    (!isempty(pw->pw_shell)?"/bin/sh":pw->pw_shell);
+        }
+      else // opt_login or no command
+        shell = isempty(pw->pw_shell)?"/bin/sh":pw->pw_shell;
+
+      if (access(shell, X_OK) != 0)
+        {
+          r = -errno;
+          fprintf(stderr, "Error accessing %s: %s\n", shell, strerror(-r));
+          return r;
+        }
+
+      args.executable = shell;
+
+      /* the broker executes 'executable' directly, while the first element of 'commandLine' is
+	 used as argv[0], so login-shell semantics is prefixing argv[0] with a dash. */
+      if (opt_login)
+        r = asprintf(&argv0, "-%s", basename(shell));
+      else
+        {
+          if ((argv0 = strdup(basename(shell))) == NULL)
+	    r = -1;
+	  else
+	    r = 0;
+        }
+      if (r < 0)
+        {
+          fprintf(stderr, "Out of memory!\n");
+          return -ENOMEM;
+        }
+
+      size_t n_cmdline = 1 + (have_cmd ? 2 : 0) + 1;
+      _cleanup_free_ char **built = calloc(n_cmdline, sizeof(char *));
+      if (!built)
+        {
+          fprintf(stderr, "Out of memory!\n");
+          return -ENOMEM;
+        }
+
+      size_t i = 0;
+      built[i++] = argv0;
+      if (have_cmd)
+        {
+          quoted_cmd = quote_shell_command(argv + n);
+          if (!quoted_cmd)
+            {
+              fprintf(stderr, "Out of memory!\n");
+              return -ENOMEM;
+            }
+          built[i++] = (char *) "-c";
+          built[i++] = quoted_cmd;
+        }
+      built[i] = NULL;
+
+      return run_pty_session(&args, built);
+    }
+
+  // Plain "exec0 COMMAND [ARGUMENT...]": run it directly
+  if (argv[n][0] != '/')
+    {
+      _cleanup_free_ char *resolved_path = find_program_in_path(argv[n]);
+      if (!resolved_path)
+        {
+          fprintf(stderr, "Command not found: %s\n", argv[n]);
+          return -ENOENT;
+        }
+      argv[n] = TAKE_PTR(resolved_path);
+    }
+  else if (access(argv[n], F_OK) != 0)
+    {
+      r = -errno;
+      fprintf(stderr, "Error accessing '%s': %s\n", argv[n], strerror(-r));
+      return r;
+    }
+
+  return run_pty_session(&args, argv + n);
 }
 
 int

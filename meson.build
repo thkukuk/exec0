@@ -50,13 +50,15 @@ possible_cc_flags = [
 add_project_arguments(cc.get_supported_arguments(possible_cc_flags), language : 'c')
 
 libsystemd = dependency('libsystemd', version : '>= 257')
+libeconf = dependency('libeconf')
 
 configure_file(output: 'config.h', configuration: conf)
 
 exec0_exe = executable('exec0',
-           ['src/main.c', 'src/main_sudo.c', 'src/ptybroker.c', 'src/polkit.c', 'src/unitwatch.c'],
+           ['src/main.c', 'src/main_pkexec.c', 'src/main_su.c', 'src/main_sudo.c',
+            'src/ptybroker.c', 'src/polkit.c', 'src/unitwatch.c', 'src/read_config.c'],
            include_directories : inc,
-           dependencies : libsystemd,
+           dependencies : [libsystemd, libeconf],
            install : false)
 
 # Build-tree symlinks, so the test suite below can invoke ./su, ./pkexec and ./sudo directly without

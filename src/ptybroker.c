@@ -56,7 +56,7 @@ terminal_settings_to_json(sd_json_variant **ret)
 /* Builds the WorkingDirectory object for AcquirePty(): either the path given via --chdir, or, like run0,
    the directory we were invoked from (rather than the target user's home directory). */
 static int
-working_directory_to_json(const Exec0Args *args, sd_json_variant **ret)
+working_directory_to_json(const config_t *args, sd_json_variant **ret)
 {
   _cleanup_free_ char *cwd = NULL;
   const char *path = args->chdir;
@@ -157,7 +157,7 @@ env_has(char **env, size_t n, const char *name)
 
    Returns 0 and sets *ret_env on success, a negative errno on failure. */
 static int
-build_environment(const Exec0Args *args, char ***ret_env)
+build_environment(const config_t *args, char ***ret_env)
 {
   static const char *const pass_through[] = { "SHELL", "XDG_SESSION_CLASS" };
 
@@ -287,7 +287,7 @@ build_environment(const Exec0Args *args, char ***ret_env)
    turns into a plain bidirectional byte stream (handed back to us as two dup()ed file descriptors) that
    carries the PTY's output to us and our input back to it. */
 static int
-acquire_shell_pty(const Exec0Args *args, char **cmdline,
+acquire_shell_pty(const config_t *args, char **cmdline,
 		  int *ret_monitor_fd, char **ret_unit)
 {
   int r;
@@ -358,6 +358,7 @@ acquire_shell_pty(const Exec0Args *args, char **cmdline,
 				    SD_JSON_BUILD_PAIR_BOOLEAN("monitor", true),
 				    SD_JSON_BUILD_PAIR_BOOLEAN("osc2811", true),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!args->name, "name", SD_JSON_BUILD_STRING(args->name)),
+				    SD_JSON_BUILD_PAIR_CONDITION(!!args->description, "description", SD_JSON_BUILD_STRING(args->description)),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!args->user, "user", SD_JSON_BUILD_STRING(args->user)),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!args->group, "group", SD_JSON_BUILD_STRING(args->group)),
 				    SD_JSON_BUILD_PAIR_CONDITION(have_cmdline, "commandLine", SD_JSON_BUILD_STRV(cmdline)),
@@ -869,7 +870,7 @@ forward_pty(int monitor_fd, int sigwinch_fd, UnitWatch *watch)
    way a shell reports $? for a foreground job.
    A negative return is for failures of the function itself. */
 int
-run_pty_session(const Exec0Args *args, char **cmdline)
+run_pty_session(const config_t *args, char **cmdline)
 {
   _cleanup_close_ int monitor_fd = -EBADF;
   _cleanup_free_ char *unit = NULL;
