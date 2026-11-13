@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-/*
-  exec0 - client for systemd-ptybrokerd's Varlink interface
-  (io.systemd.PTYBroker).
-
-  This opens a shell (or an arbitrary command) through the broker's
-  AcquirePty() method, using backendType "shell", and forwards the
-  resulting pseudo TTY to our own terminal until the session ends.
-*/
-
 #include "config.h"
 
 #include <errno.h>
@@ -23,77 +14,14 @@
 #include "basics.h"
 #include "ptybroker.h"
 
-/* Connects to the broker, forwards our terminal to the acquired PTY until the session ends, and restores
-   our terminal settings afterwards. Shared tail end of main_exec0(), main_pkexec() and main_su(): they only
-   differ in how they come up with 'args' and 'cmdline'.
-
-   On success, unlike most functions in this program, the return value is *not* "0 for success" but the
-   actual exit status (0-255) of the backend shell or command, the same way a shell reports $? for a
-   foreground job: a negative return is still reserved for exec0's own, unrelated failures (couldn't connect
-   to the broker, I/O error while forwarding, ...). This mirrors run0's approach (see start_via_ptybroker()
-   in systemd's src/run/run.c): AcquirePty() itself carries no information at all about how the backend
-   process eventually exits, so the transient unit it runs as is watched directly via the service manager's
-   D-Bus API, in parallel with the PTY forwarding; see unitwatch.h. */
-static int
-run_pty_session(const Exec0Args *args, char **cmdline)
-{
-  _cleanup_close_ int monitor_fd = -EBADF;
-  _cleanup_free_ char *unit = NULL;
-  int r;
-
-  r = acquire_shell_pty(args, cmdline, &monitor_fd, &unit);
-  if (r < 0)
-    return r;
-
-  _cleanup_(unit_watch_done) UnitWatch watch = {};
-  if (unit)
-    {
-      r = unit_watch_start(unit, &watch);
-      if (r < 0)
-	fprintf(stderr, "Warning: failed to watch unit '%s', exit status will not be available: %s\n",
-		unit, strerror(-r));
-    }
-
-  signal(SIGPIPE, SIG_IGN);
-
-  r = set_raw_terminal();
-  if (r < 0)
-    fprintf(stderr, "Warning: failed to switch terminal to raw mode: %s\n", strerror(-r));
-
-  _cleanup_close_ int sigwinch_fd = -EBADF;
-  if (isatty(STDIN_FILENO))
-    {
-      sigwinch_fd = make_sigwinch_fd();
-      if (sigwinch_fd < 0)
-	{
-	  fprintf(stderr,
-		  "Warning: failed to watch for terminal size changes: %s\n",
-		  strerror(-sigwinch_fd));
-	  sigwinch_fd = -EBADF;
-	}
-    }
-
-  r = forward_pty(monitor_fd, sigwinch_fd, &watch);
-
-  restore_terminal();
-
-  if (r < 0)
-    {
-      fprintf(stderr, "PTY forwarding failed: %s\n", strerror(-r));
-      return r;
-    }
-
-  return unit_watch_exit_status(&watch);
-}
-
-/* Looks up 'program' in $PATH, the way a shell (or execvp(3)) would, since the broker is asked to execve(2)
-   the command line directly (viaShell: false) and thus needs an absolute path. Returns a newly allocated
-   absolute path, or NULL if it couldn't be found (or on allocation failure). */
+// Looks up 'program' in $PATH, the way a shell (or execvp(3)) would.
 static char *
 find_program_in_path(const char *program)
 {
   const char *path_env = getenv("PATH") ?: "/usr/bin:/bin";
-  _cleanup_free_ char *paths = strdup(path_env);
+  _cleanup_free_ char *paths = NULL;
+
+  paths = strdup(path_env);
   if (!paths)
     return NULL;
 
@@ -241,9 +169,8 @@ static void
 help_su(void)
 {
   printf("su [options] [-] [<user> [<argument>...]]\n\n"
-	 "Change the effective user ID and group ID to that of <user>, via exec0's\n"
-	 "PTYBroker plumbing. A mere - implies --login. If <user> is not given, root\n"
-	 "is assumed.\n\n"
+	 "Change the effective user ID and group ID to that of <user>, via PTYBroker.\n"
+	 "A mere - implies --login. If <user> is not given, root is assumed.\n\n"
 	 "  -c, --command <command>              pass <command> to the shell with -c\n"
 	 "      --session-command <command>      same as -c\n"
 	 "  -f, --fast                           pass -f to the shell\n"
@@ -253,20 +180,17 @@ help_su(void)
 	 "  -s, --shell <shell>                  run <shell> instead of the target user's default\n"
 	 "  -w, --whitelist-environment <list>   forward the given, comma-separated variables\n"
 	 "  -P, --pty, -T, --no-pty              accepted for compatibility, without effect\n"
-	 "  -v, --verbose                        show the acquired PTY's name and unit\n"
+	 "  -v, --verbose                        show additional information\n"
 	 "  -h, --help                           show this help\n"
 	 "  -V, --version                        show version\n");
 }
 
-/* Emulates su(1)'s command line and defaults as closely as reasonably possible on top of exec0's PTYBroker
-   plumbing: authentication, environment handling and session setup are the broker's (and polkit's) job (see
-   acquire_shell_pty() and build_environment() in ptybroker.c), what's left to do here is turning su's own
-   command line into the equivalent exec0 request. Unlike pkexec, su normally stays in the caller's current
-   directory and only switches to the target user's home directory for --login (a mere "-"), and normally
-   only forwards a small, curated environment (--preserve-environment / --whitelist-environment ask the
-   broker to forward more, see build_environment()). su's -G/--supp-group has no equivalent: the broker's
-   AcquirePty() only lets the shell backend run as a single, given primary group (see the 'group' field in
-   Exec0Args / "group" in ptybroker.c), not a list of supplementary ones. */
+/* Emulates su(1)'s command line and defaults as closely as reasonably possible using PTYBroker.
+   Authentication, environment handling and session setup are the broker's (and polkit's) job, what's
+   left to do here is turning su's own command line into the equivalent PTYBroker request. su normally
+   only forwards a small, curated environment (--preserve-environment / --whitelist-environment).
+   su's -G/--supp-group has no equivalent: the PTYBroker only lets the shell backend run as a single,
+   given primary group, not a list of supplementary ones. */
 static int
 main_su(int argc, char *argv[])
 {
