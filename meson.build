@@ -54,15 +54,16 @@ libsystemd = dependency('libsystemd', version : '>= 257')
 configure_file(output: 'config.h', configuration: conf)
 
 exec0_exe = executable('exec0',
-           ['src/main.c', 'src/ptybroker.c', 'src/polkit.c', 'src/unitwatch.c'],
+           ['src/main.c', 'src/main_sudo.c', 'src/ptybroker.c', 'src/polkit.c', 'src/unitwatch.c'],
            include_directories : inc,
            dependencies : libsystemd,
            install : false)
 
-# Build-tree symlinks, so the test suite below can invoke ./su and ./pkexec directly without needing
-# 'ninja install' first; this is independent of whether they get installed (see compat-symlink below).
+# Build-tree symlinks, so the test suite below can invoke ./su, ./pkexec and ./sudo directly without
+# needing 'ninja install' first; this is independent of whether they get installed (see
+# compat-symlink below).
 wrapper_symlinks = []
-foreach name : ['su', 'pkexec']
+foreach name : ['su', 'pkexec', 'sudo']
   wrapper_symlinks += custom_target(name,
              output : name,
              command : ['ln', '-sf', 'exec0', '@OUTPUT@'],
@@ -75,6 +76,9 @@ if get_option('compat-symlink')
                   pointing_to: 'exec0',
                   install_dir: 'bin')
   install_symlink('su',
+                  pointing_to: 'exec0',
+                  install_dir: 'bin')
+  install_symlink('sudo',
                   pointing_to: 'exec0',
                   install_dir: 'bin')
 endif

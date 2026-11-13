@@ -28,5 +28,4 @@ polkit._exec0_nopasswd.push("user1","user2",...);
 
 ## wrappers
 
-Additional, this package provides wrappers for pkexec, su and in the
-future sudo.
+Additional, this package provides wrappers for pkexec, su and sudo.

@@ -12,10 +12,12 @@
 #include <unistd.h>
 
 #include "basics.h"
+#include "main_sudo.h"
+#include "pathlookup.h"
 #include "ptybroker.h"
 
 // Looks up 'program' in $PATH, the way a shell (or execvp(3)) would.
-static char *
+char *
 find_program_in_path(const char *program)
 {
   const char *path_env = getenv("PATH") ?: "/usr/bin:/bin";
@@ -459,6 +461,8 @@ main (int argc, char **argv)
     r = main_pkexec(argc, argv);
   else if (streq(basename(argv[0]), "su"))
     r = main_su(argc, argv);
+  else if (streq(basename(argv[0]), "sudo"))
+    r = main_sudo(argc, argv);
   else
     r = main_exec0(argc, argv);
 

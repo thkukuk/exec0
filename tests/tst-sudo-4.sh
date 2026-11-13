@@ -2,11 +2,11 @@
 
 LANG=C.UTF-8
 
-# Test 2: Environment variable preservation
-echo -e "\nTest 2: Environment variable preservation (-E)"
+# Test 4: Environment variable preservation (-E)
+echo "Test 4: Environment variable preservation (-E)"
 TEST_VAR="test123"
 export TEST_VAR
-if ./run0-sudo -E printenv TEST_VAR | grep -q "test123"; then
+if ./sudo -E printenv TEST_VAR | grep -q "test123"; then
     echo "✓ PASS: Environment variable preservation works"
 else
     echo "✗ FAIL: Environment variable preservation failed"

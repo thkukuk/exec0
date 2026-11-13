@@ -5,6 +5,7 @@
 
 #include "config.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <poll.h>
 #include <pwd.h>
@@ -109,6 +110,26 @@ strv_freep(char ***v)
   strv_free(*v);
 }
 
+/* Returns true if the first 'len' bytes of 's' form a valid environment variable name (the same rule
+   execve(2)/getenv(3) implicitly assume: a leading letter or underscore, followed by letters, digits
+   or underscores). Bash exports shell functions as environment entries named "BASH_FUNC_<name>%%",
+   which fail this (on account of the '%'s) and must be filtered out of a preserved environment before
+   it is handed to the broker: unlike a shell, which only ever iterates its own environment array
+   without validating names, systemd-ptybrokerd itself rejects the whole AcquirePty() call outright
+   (SD_VARLINK_ERROR_INVALID_PARAMETER) if asked to set even a single invalid one. */
+static bool
+env_name_valid(const char *s, size_t len)
+{
+  if (len == 0 || (!isalpha((unsigned char) s[0]) && s[0] != '_'))
+    return false;
+
+  for (size_t i = 1; i < len; i++)
+    if (!isalnum((unsigned char) s[i]) && s[i] != '_')
+      return false;
+
+  return true;
+}
+
 // Returns true if 'env' (an array of "VAR=VALUE" strings, 'n' of them) already has an entry for 'name'.
 static bool
 env_has(char **env, size_t n, const char *name)
@@ -147,6 +168,10 @@ build_environment(const Exec0Args *args, char ***ret_env)
     {
       for (char **e = environ; e && *e; e++)
 	{
+	  const char *eq = strchr(*e, '=');
+	  if (!eq || !env_name_valid(*e, (size_t) (eq - *e)))
+	    continue;
+
 	  _cleanup_free_ char *kv = strdup(*e);
 	  if (!kv)
 	    return -ENOMEM;
