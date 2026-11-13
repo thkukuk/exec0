@@ -275,6 +275,15 @@ main_sudo(int argc, char *argv[])
       return -EINVAL;
     }
 
+  // sudo without arguments bails out with an error
+  if (n >= (unsigned) argc && !opt_login && !opt_shell_mode && !opt_validate &&
+      !opt_reset_timestamp && !opt_remove_timestamp)
+    {
+      fprintf(stderr, "sudo: a command is required\n");
+      usage_sudo(stderr);
+      return -EINVAL;
+    }
+
   if (opt_preserve_list && !opt_preserve_all)
     {
       whitelist = strdup(opt_preserve_list);
@@ -376,11 +385,17 @@ main_sudo(int argc, char *argv[])
   if (opt_login && !args.chdir)
     args.chdir = pw->pw_dir;
 
-  /* sudo(1) runs a shell, rather than executing PROGRAM directly, for -i, -s, and also when invoked
-     with no command at all ("implied shell", e.g. plain "sudo"). */
-  bool run_shell = opt_login || opt_shell_mode || !have_cmd;
+  /* sudo(1) runs a shell, rather than executing PROGRAM directly, for -i and -s. Unlike sudo(1),
+     there is no "implied shell" for a command-less invocation in general: that case was already
+     rejected above unless the only thing left on the command line was a VAR=value assignment (no
+     -i/-s either), in which case falling through to run_pty_session() with no command line lets the
+     broker apply its own default (the target user's login shell), the same way plain exec0 does. */
+  bool run_shell = opt_login || opt_shell_mode;
 
   char **cmdline;
+
+  if (!run_shell && !have_cmd)
+    return run_pty_session(&args, NULL);
 
   if (run_shell)
     {
