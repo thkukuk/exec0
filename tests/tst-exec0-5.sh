@@ -6,9 +6,9 @@ LANG=C.UTF-8
 # directly run command. (SIGTERM/SIGHUP/SIGINT/SIGPIPE are deliberately excluded from this: systemd itself
 # treats those as a clean shutdown for a service of this type, the same way run0 does.)
 echo -e "\nTest 5: Exit status propagation (killed by signal)"
-./exec0 -u root -- /usr/bin/sh -c 'kill -KILL $$'
+./exec0 -u root /usr/bin/sh -c 'kill -KILL $$'
 rc1=$?
-./exec0 -u root -- /usr/bin/sh -c 'kill -SEGV $$'
+./exec0 -u root /usr/bin/sh -c 'kill -SEGV $$'
 rc2=$?
 if [ "$rc1" -eq 137 ] && [ "$rc2" -eq 139 ]; then
     echo "✓ PASS: Signal exit status propagation works"

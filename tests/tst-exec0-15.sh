@@ -6,8 +6,7 @@ LANG=C.UTF-8
 # Bash exports shell functions as environment entries named
 # "BASH_FUNC_<name>%%" with the function body as the value. Such names
 # are not valid environment variable identifiers and must be skipped
-# instead of being passed on to run0's --setenv, which would abort with
-# "Invalid argument".
+# instead of being passed on to exec0
 
 echo -e "\nTest 15: -E ignores bash-exported shell functions"
 TEST_VAR="test123"
@@ -16,7 +15,7 @@ export TEST_VAR
 mc() { :; }
 export -f mc
 
-if ./exec0 -u root -E -- printenv TEST_VAR | grep -q "test123"; then
+if ./exec0 -u root -E printenv TEST_VAR | grep -q "test123"; then
     echo "✓ PASS: -E still preserves normal variables with a shell function exported"
 else
     echo "✗ FAIL: -E failed while a shell function was exported"

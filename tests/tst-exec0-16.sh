@@ -2,7 +2,7 @@
 
 LANG=C.UTF-8
 
-# Test 16: plain "exec0 -i" with no command (as opposed to "exec0 -i -- COMMAND", already covered by
+# Test 16: plain "exec0 -i" with no command (as opposed to "exec0 -i COMMAND", already covered by
 # test 6) must still start a real interactive login shell: dash-prefixed argv[0] and the target
 # user's home directory as cwd. With no command line, exec0 leaves the shell invocation entirely to
 # the broker's own default semantics, so this exercises that path specifically.
