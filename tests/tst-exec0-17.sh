@@ -16,6 +16,11 @@ if ! ./exec0 --background '44' -u root true; then
     exit 1
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "✗ SKIP: python3 not installed"
+    exit 77
+fi
+
 output=$(python3 -c "
 import pty, os, sys, time
 pid, fd = pty.fork()
