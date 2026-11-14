@@ -61,7 +61,7 @@ main_sudo(int argc, char *argv[])
   _cleanup_free_ char *argv0 = NULL;
   _cleanup_free_ char *quoted_cmnd = NULL;
   _cleanup_free_ char *whitelist = NULL;
-  config_t args = {};
+  config_t cfg = {};
   char *opt_user = "root";
   char *opt_preserve_list = NULL;
   bool opt_login = false;
@@ -81,7 +81,7 @@ main_sudo(int argc, char *argv[])
 
   /* Load /etc/exec0/sudo.conf (or /usr/share/exec0/sudo.conf) first, so its settings act as
      defaults that the command line parsed below can still override. */
-  cfg_err = read_config("sudo", &args);
+  cfg_err = read_config("sudo", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "sudo: failed to read configuration: %s\n", econf_errString(cfg_err));
 
@@ -124,10 +124,10 @@ main_sudo(int argc, char *argv[])
 	      usage_sudo(stderr);
 	      return -EINVAL;
 	    }
-	  args.group = argv[n];
+	  cfg.group = argv[n];
 	}
       else if (strneq(arg, "--group=", 8))
-	args.group = arg + 8;
+	cfg.group = arg + 8;
       else if (streq(arg, "-D") || streq(arg, "--chdir"))
 	{
 	  if (++n >= (unsigned) argc)
@@ -136,10 +136,10 @@ main_sudo(int argc, char *argv[])
 	      usage_sudo(stderr);
 	      return -EINVAL;
 	    }
-	  args.chdir = argv[n];
+	  cfg.chdir = argv[n];
 	}
       else if (strneq(arg, "--chdir=", 8))
-	args.chdir = arg + 8;
+	cfg.chdir = arg + 8;
       else if (streq(arg, "-i") || streq(arg, "--login"))
 	opt_login = true;
       else if (streq(arg, "-s") || streq(arg, "--shell"))
@@ -164,7 +164,7 @@ main_sudo(int argc, char *argv[])
       else if (streq(arg, "-v") || streq(arg, "--validate"))
 	opt_validate = true;
       else if (streq(arg, "--verbose"))
-	args.verbose = true;
+	cfg.verbose = true;
       else if (streq(arg, "-e") || streq(arg, "--edit") ||
 	       streq(arg, "-l") || streq(arg, "--list") ||
 	       streq(arg, "-b") || streq(arg, "--background"))
@@ -276,7 +276,7 @@ main_sudo(int argc, char *argv[])
   /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the
      process, unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that
      build_environment() in ptybroker.c will clobber via its own getpwuid() call. */
-  args.user = opt_user;
+  cfg.user = opt_user;
 
   errno = 0;
   pw = getpwnam(opt_user);
@@ -306,16 +306,16 @@ main_sudo(int argc, char *argv[])
     }
 
   if (opt_preserve_all)
-    args.preserve_environment = true;
+    cfg.preserve_environment = true;
   else if (whitelist)
-    args.whitelist_env = whitelist;
+    cfg.whitelist_env = whitelist;
 
   /* Like su -l / pkexec's default: only -i switches the working directory to the target user's home;
      plain sudo, like sudo(1) itself, stays in the caller's current directory (exec0's own default,
      see working_directory_to_json() in ptybroker.c) unless -D/--chdir overrides it explicitly, which
-     was already stored directly into args.chdir above. */
-  if (opt_login && !args.chdir)
-    args.chdir = pw->pw_dir;
+     was already stored directly into cfg.chdir above. */
+  if (opt_login && !cfg.chdir)
+    cfg.chdir = pw->pw_dir;
 
   /* sudo(1) runs a shell, rather than executing PROGRAM directly, for -i and -s. Unlike sudo(1), there
      is no "implied shell" for a command-less invocation in general: that case was already rejected
@@ -356,7 +356,7 @@ main_sudo(int argc, char *argv[])
 	  return r;
 	}
 
-      args.executable = shell;
+      cfg.executable = shell;
 
       /* Like run_shell() in util-linux's su(1): the broker executes 'executable' directly, while the
 	 first element of 'commandLine' is only ever used as argv[0], so login-shell semantics are
@@ -397,7 +397,7 @@ main_sudo(int argc, char *argv[])
 	}
       built[i] = NULL;
 
-      return run_pty_session(&args, built);
+      return run_pty_session(&cfg, built);
     }
 
   /* Plain "sudo COMMAND [ARGUMENT...]": run it directly, same as exec0/pkexec do. */
@@ -422,5 +422,5 @@ main_sudo(int argc, char *argv[])
   argv[n] = path;
   cmdline = argv + n;
 
-  return run_pty_session(&args, cmdline);
+  return run_pty_session(&cfg, cmdline);
 }

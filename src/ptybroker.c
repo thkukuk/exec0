@@ -56,10 +56,10 @@ terminal_settings_to_json(sd_json_variant **ret)
 /* Builds the WorkingDirectory object for AcquirePty(): either the path given via --chdir, or, like run0,
    the directory we were invoked from (rather than the target user's home directory). */
 static int
-working_directory_to_json(const config_t *args, sd_json_variant **ret)
+working_directory_to_json(const config_t *cfg, sd_json_variant **ret)
 {
   _cleanup_free_ char *cwd = NULL;
-  const char *path = args->chdir;
+  const char *path = cfg->chdir;
 
   if (!path)
     {
@@ -145,26 +145,26 @@ env_has(char **env, size_t n, const char *name)
 
 /* Builds the environment to hand to the shell on the backend side. By
    default this is a small, curated set of variables forwarded from the
-   own environment if set, plus anything named by args->whitelist_env
-   (su(1)'s -w/--whitelist-environment); if args->preserve_environment
+   own environment if set, plus anything named by cfg->whitelist_env
+   (su(1)'s -w/--whitelist-environment); if cfg->preserve_environment
    is set instead (su(1)'s -p/--preserve-environment), the whole environment
    is forwarded verbatim. In both cases this is topped off with
    SHELL_PROMPT_PREFIX defaulting to a fixed marker if the caller didn't
    already customize it, and SUDO_USER/SUDO_UID/SUDO_GID identifying the
    real, invoking user, for compatibility with scripts that only know how
    to look for sudo's conventions, unless those are already present (which,
-   with args->preserve_environment, they may well be).
+   with cfg->preserve_environment, they may well be).
 
    Returns 0 and sets *ret_env on success, a negative errno on failure. */
 static int
-build_environment(const config_t *args, char ***ret_env)
+build_environment(const config_t *cfg, char ***ret_env)
 {
   static const char *const pass_through[] = { "SHELL", "XDG_SESSION_CLASS" };
 
   _cleanup_(strv_freep) char **env = NULL;
   size_t n = 0;
 
-  if (args->preserve_environment)
+  if (cfg->preserve_environment)
     {
       for (char **e = environ; e && *e; e++)
 	{
@@ -198,9 +198,9 @@ build_environment(const config_t *args, char ***ret_env)
 	    return r;
 	}
 
-      if (args->whitelist_env)
+      if (cfg->whitelist_env)
 	{
-	  _cleanup_free_ char *copy = strdup(args->whitelist_env);
+	  _cleanup_free_ char *copy = strdup(cfg->whitelist_env);
 	  if (!copy)
 	    return -ENOMEM;
 
@@ -228,7 +228,7 @@ build_environment(const config_t *args, char ***ret_env)
 
   /* Mark the shell as privileged in the prompt, like run0 does: forward the caller's own prefix if they
      already customized it, otherwise fall back to a default one. */
-  if (!args->preserve_environment || !env_has(env, n, "SHELL_PROMPT_PREFIX"))
+  if (!cfg->preserve_environment || !env_has(env, n, "SHELL_PROMPT_PREFIX"))
     {
       const char *prompt_prefix = getenv("SHELL_PROMPT_PREFIX");
       _cleanup_free_ char *kv = NULL;
@@ -241,7 +241,7 @@ build_environment(const config_t *args, char ***ret_env)
 	return r;
     }
 
-  if (pw && (!args->preserve_environment || !env_has(env, n, "SUDO_USER")))
+  if (pw && (!cfg->preserve_environment || !env_has(env, n, "SUDO_USER")))
     {
       _cleanup_free_ char *kv = NULL;
 
@@ -253,7 +253,7 @@ build_environment(const config_t *args, char ***ret_env)
 	return r;
     }
 
-  if (!args->preserve_environment || !env_has(env, n, "SUDO_UID"))
+  if (!cfg->preserve_environment || !env_has(env, n, "SUDO_UID"))
     {
       _cleanup_free_ char *kv = NULL;
 
@@ -265,7 +265,7 @@ build_environment(const config_t *args, char ***ret_env)
 	return r;
     }
 
-  if (!args->preserve_environment || !env_has(env, n, "SUDO_GID"))
+  if (!cfg->preserve_environment || !env_has(env, n, "SUDO_GID"))
     {
       _cleanup_free_ char *kv = NULL;
 
@@ -287,7 +287,7 @@ build_environment(const config_t *args, char ***ret_env)
    turns into a plain bidirectional byte stream (handed back to us as two dup()ed file descriptors) that
    carries the PTY's output to us and our input back to it. */
 static int
-acquire_shell_pty(const config_t *args, char **cmdline,
+acquire_shell_pty(const config_t *cfg, char **cmdline,
 		  int *ret_monitor_fd, char **ret_unit)
 {
   int r;
@@ -319,7 +319,7 @@ acquire_shell_pty(const config_t *args, char **cmdline,
     }
 
   _cleanup_(sd_json_variant_unrefp) sd_json_variant *working_directory = NULL;
-  r = working_directory_to_json(args, &working_directory);
+  r = working_directory_to_json(cfg, &working_directory);
   if (r < 0)
     {
       fprintf(stderr, "Failed to determine working directory: %s\n", strerror(-r));
@@ -327,7 +327,7 @@ acquire_shell_pty(const config_t *args, char **cmdline,
     }
 
   _cleanup_(strv_freep) char **environment = NULL;
-  r = build_environment(args, &environment);
+  r = build_environment(cfg, &environment);
   if (r < 0)
     {
       fprintf(stderr, "Failed to build environment: %s\n", strerror(-r));
@@ -357,13 +357,13 @@ acquire_shell_pty(const config_t *args, char **cmdline,
 				    SD_JSON_BUILD_PAIR_STRING("backendType", "shell"),
 				    SD_JSON_BUILD_PAIR_BOOLEAN("monitor", true),
 				    SD_JSON_BUILD_PAIR_BOOLEAN("osc2811", true),
-				    SD_JSON_BUILD_PAIR_CONDITION(!!args->name, "name", SD_JSON_BUILD_STRING(args->name)),
-				    SD_JSON_BUILD_PAIR_CONDITION(!!args->description, "description", SD_JSON_BUILD_STRING(args->description)),
-				    SD_JSON_BUILD_PAIR_CONDITION(!!args->user, "user", SD_JSON_BUILD_STRING(args->user)),
-				    SD_JSON_BUILD_PAIR_CONDITION(!!args->group, "group", SD_JSON_BUILD_STRING(args->group)),
+				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->name, "name", SD_JSON_BUILD_STRING(cfg->name)),
+				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->description, "description", SD_JSON_BUILD_STRING(cfg->description)),
+				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->user, "user", SD_JSON_BUILD_STRING(cfg->user)),
+				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->group, "group", SD_JSON_BUILD_STRING(cfg->group)),
 				    SD_JSON_BUILD_PAIR_CONDITION(have_cmdline, "commandLine", SD_JSON_BUILD_STRV(cmdline)),
 				    SD_JSON_BUILD_PAIR_CONDITION(have_cmdline, "viaShell", SD_JSON_BUILD_BOOLEAN(false)),
-				    SD_JSON_BUILD_PAIR_CONDITION(!!args->executable, "executable", SD_JSON_BUILD_STRING(args->executable)),
+				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->executable, "executable", SD_JSON_BUILD_STRING(cfg->executable)),
 				    SD_JSON_BUILD_PAIR_VARIANT("terminalSettings", terminal_settings),
 				    SD_JSON_BUILD_PAIR_VARIANT("workingDirectory", working_directory),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!environment, "environment", SD_JSON_BUILD_STRV(environment)),
@@ -411,7 +411,7 @@ acquire_shell_pty(const config_t *args, char **cmdline,
 
   sd_json_variant *unit = sd_json_variant_by_key(reply, "unit");
 
-  if (args->verbose)
+  if (cfg->verbose)
     {
       sd_json_variant *name = sd_json_variant_by_key(reply, "name");
       fprintf(stderr, "Connected to PTY '%s'%s%s.\n",
@@ -870,13 +870,13 @@ forward_pty(int monitor_fd, int sigwinch_fd, UnitWatch *watch)
    way a shell reports $? for a foreground job.
    A negative return is for failures of the function itself. */
 int
-run_pty_session(const config_t *args, char **cmdline)
+run_pty_session(const config_t *cfg, char **cmdline)
 {
   _cleanup_close_ int monitor_fd = -EBADF;
   _cleanup_free_ char *unit = NULL;
   int r;
 
-  r = acquire_shell_pty(args, cmdline, &monitor_fd, &unit);
+  r = acquire_shell_pty(cfg, cmdline, &monitor_fd, &unit);
   if (r < 0)
     return r;
 

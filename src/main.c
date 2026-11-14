@@ -111,13 +111,13 @@ whitelist_add(char **list, const char *name)
   return 0;
 }
 
-/* Joins 'args' (a NULL-terminated argv tail) into a single string suitable for "shell -c STRING",
+/* Joins 'cfg' (a NULL-terminated argv tail) into a single string suitable for "shell -c STRING",
    quoting any shell metacharacters by backslash-escaping them. */
 char *
-quote_shell_command(char **args)
+quote_shell_command(char **cfg)
 {
   size_t size = 1; /* trailing NUL */
-  for (char **a = args; *a; a++)
+  for (char **a = cfg; *a; a++)
     size += strlen(*a) * 2 + 1; /* worst case: every byte escaped, plus a separating space */
 
   char *cmd = malloc(size);
@@ -125,7 +125,7 @@ quote_shell_command(char **args)
     return NULL;
 
   char *dst = cmd;
-  for (char **a = args; *a; a++)
+  for (char **a = cfg; *a; a++)
     {
       for (const char *s = *a; *s; s++)
         {
@@ -177,7 +177,7 @@ main_exec0(int argc, char *argv[])
   _cleanup_free_ char *argv0 = NULL;
   _cleanup_free_ char *quoted_cmd = NULL;
   _cleanup_free_ char *whitelist = NULL;
-  config_t args = {};
+  config_t cfg = {};
   bool opt_login = false;
   bool opt_shell = false;
   char *opt_preserve_list = NULL;
@@ -191,7 +191,7 @@ main_exec0(int argc, char *argv[])
 
   /* Load /etc/exec0/exec0.conf (or /usr/share/exec0/exec0.conf) first, so its settings act as
      defaults that the command line parsed below can still override. */
-  cfg_err = read_config("exec0", &args);
+  cfg_err = read_config("exec0", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "exec0: failed to read configuration: %s\n", econf_errString(cfg_err));
 
@@ -222,10 +222,10 @@ main_exec0(int argc, char *argv[])
               usage_exec0(stderr);
               return -EINVAL;
             }
-          args.user = argv[n];
+          cfg.user = argv[n];
         }
       else if (strneq(arg, "--user=", 7))
-        args.user = arg + 7;
+        cfg.user = arg + 7;
       else if (streq(arg, "-g") || streq(arg, "--group"))
         {
           if (++n >= argc)
@@ -234,10 +234,10 @@ main_exec0(int argc, char *argv[])
               usage_exec0(stderr);
               return -EINVAL;
             }
-          args.group = argv[n];
+          cfg.group = argv[n];
         }
       else if (strneq(arg, "--group=", 8))
-        args.group = arg + 8;
+        cfg.group = arg + 8;
       else if (streq(arg, "-D") || streq(arg, "--chdir"))
         {
           if (++n >= argc)
@@ -246,16 +246,16 @@ main_exec0(int argc, char *argv[])
               usage_exec0(stderr);
               return -EINVAL;
             }
-          args.chdir = argv[n];
+          cfg.chdir = argv[n];
         }
       else if (strneq(arg, "--chdir=", 8))
-        args.chdir = arg + 8;
+        cfg.chdir = arg + 8;
       else if (streq(arg, "-i") || streq(arg, "--login"))
         opt_login = true;
       else if (streq(arg, "-s") || streq(arg, "--shell"))
         opt_shell = true;
       else if (streq(arg, "-E"))
-        args.preserve_environment = true;
+        cfg.preserve_environment = true;
       else if (streq(arg, "--preserve-env"))
         {
           /* Optional argument: take the next word as the list only if it actually looks like
@@ -265,14 +265,14 @@ main_exec0(int argc, char *argv[])
           if (n + 1 < argc && strchr(argv[n + 1], ',') && is_env_list(argv[n + 1]))
             opt_preserve_list = argv[++n];
           else
-            args.preserve_environment = true;
+            cfg.preserve_environment = true;
         }
       else if (strneq(arg, "--preserve-env=", 15))
         opt_preserve_list = arg + 15;
       else if (streq(arg, "-v") || streq(arg, "--verbose"))
-        args.verbose = true;
+        cfg.verbose = true;
       else if (streq(arg, "-q") || streq(arg, "--quiet"))
-        args.verbose = false;
+        cfg.verbose = false;
       else if (streq(arg, "--name"))
         {
           if (++n >= argc)
@@ -281,7 +281,7 @@ main_exec0(int argc, char *argv[])
               usage_exec0(stderr);
               return -EINVAL;
             }
-          args.name = argv[n];
+          cfg.name = argv[n];
         }
       else if (streq(arg, "--description"))
         {
@@ -291,7 +291,7 @@ main_exec0(int argc, char *argv[])
               usage_exec0(stderr);
               return -EINVAL;
             }
-          args.description = argv[n];
+          cfg.description = argv[n];
         }
       else if (arg[0] == '-' && arg[1] != '\0')
         {
@@ -310,7 +310,7 @@ main_exec0(int argc, char *argv[])
       return -EINVAL;
     }
 
-  if (opt_login && args.preserve_environment)
+  if (opt_login && cfg.preserve_environment)
     {
       fprintf(stderr, "exec0: you may not specify both the -i and -E options\n");
       usage_exec0(stderr);
@@ -324,7 +324,7 @@ main_exec0(int argc, char *argv[])
       return -EINVAL;
     }
 
-  if (opt_preserve_list && !args.preserve_environment)
+  if (opt_preserve_list && !cfg.preserve_environment)
     {
       whitelist = strdup(opt_preserve_list);
       if (!whitelist)
@@ -344,7 +344,7 @@ main_exec0(int argc, char *argv[])
 
       *eq = '\0';
       r = setenv(argv[n], eq + 1, 1);
-      if (r == 0 && !args.preserve_environment)
+      if (r == 0 && !cfg.preserve_environment)
         r = whitelist_add(&whitelist, argv[n]);
       *eq = '=';
       if (r < 0)
@@ -359,21 +359,21 @@ main_exec0(int argc, char *argv[])
   bool have_cmd = n < argc;
 
   errno = 0;
-  struct passwd *pw = getpwnam(isempty(args.user)?"root":args.user);
+  struct passwd *pw = getpwnam(isempty(cfg.user)?"root":cfg.user);
   if (!pw)
     {
       r = errno ? -errno : -ENOENT;
-      fprintf(stderr, "User %s does not exist (%s)\n", args.user, strerror(-r));
+      fprintf(stderr, "User %s does not exist (%s)\n", cfg.user, strerror(-r));
       return r;
     }
 
-  if (args.preserve_environment)
-    args.preserve_environment = true;
+  if (cfg.preserve_environment)
+    cfg.preserve_environment = true;
   else if (whitelist)
-    args.whitelist_env = whitelist;
+    cfg.whitelist_env = whitelist;
 
-  if (opt_login && !args.chdir)
-    args.chdir = pw->pw_dir;
+  if (opt_login && !cfg.chdir)
+    cfg.chdir = pw->pw_dir;
 
   /* Plain "exec0" with nothing else given runs a shell, same as "-s": go through the same
      shell-building code path below so it gets a non-login shell, rather than leaving 'executable'
@@ -399,7 +399,7 @@ main_exec0(int argc, char *argv[])
           return r;
         }
 
-      args.executable = shell;
+      cfg.executable = shell;
 
       /* the broker executes 'executable' directly, while the first element of 'commandLine' is
 	 used as argv[0], so login-shell semantics is prefixing argv[0] with a dash. */
@@ -441,7 +441,7 @@ main_exec0(int argc, char *argv[])
         }
       built[i] = NULL;
 
-      return run_pty_session(&args, built);
+      return run_pty_session(&cfg, built);
     }
 
   // Plain "exec0 COMMAND [ARGUMENT...]": run it directly
@@ -462,7 +462,7 @@ main_exec0(int argc, char *argv[])
       return r;
     }
 
-  return run_pty_session(&args, argv + n);
+  return run_pty_session(&cfg, argv + n);
 }
 
 int

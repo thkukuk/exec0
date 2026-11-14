@@ -39,7 +39,7 @@ main_su(int argc, char *argv[])
 {
   _cleanup_free_ char *resolved_shell = NULL;
   _cleanup_free_ char *chdir_home = NULL;
-  config_t args = {};
+  config_t cfg = {};
   char *opt_user = "root";
   char *opt_shell = NULL;
   char *opt_command = NULL;
@@ -55,7 +55,7 @@ main_su(int argc, char *argv[])
 
   /* Load /etc/exec0/su.conf (or /usr/share/exec0/su.conf) first, so its settings act as defaults
      that the command line parsed below can still override. */
-  cfg_err = read_config("su", &args);
+  cfg_err = read_config("su", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "su: failed to read configuration: %s\n", econf_errString(cfg_err));
 
@@ -76,7 +76,7 @@ main_su(int argc, char *argv[])
       else if (streq(argv[n], "-f") || streq(argv[n], "--fast"))
 	opt_fast = true;
       else if (streq(argv[n], "-m") || streq(argv[n], "-p") || streq(argv[n], "--preserve-environment"))
-	args.preserve_environment = true;
+	cfg.preserve_environment = true;
       else if (streq(argv[n], "-c") || streq(argv[n], "--command") || streq(argv[n], "--session-command"))
 	{
 	  n++;
@@ -105,7 +105,7 @@ main_su(int argc, char *argv[])
 	      help_su();
 	      return -EINVAL;
 	    }
-	  args.group = argv[n];
+	  cfg.group = argv[n];
 	}
       else if (streq(argv[n], "-w") || streq(argv[n], "--whitelist-environment"))
 	{
@@ -115,14 +115,14 @@ main_su(int argc, char *argv[])
 	      help_su();
 	      return -EINVAL;
 	    }
-	  args.whitelist_env = argv[n];
+	  cfg.whitelist_env = argv[n];
 	}
       else if (streq(argv[n], "-P") || streq(argv[n], "--pty") ||
 	       streq(argv[n], "-T") || streq(argv[n], "--no-pty"))
 	/* exec0 always proxies a pty allocated by the broker; nothing to toggle. */
 	;
       else if (streq(argv[n], "-v") || streq(argv[n], "--verbose"))
-	args.verbose = true;
+	cfg.verbose = true;
       else if (streq(argv[n], "-G") || streq(argv[n], "--supp-group"))
 	{
 	  fprintf(stderr, "su: supplementary groups are not supported via the PTYBroker.\n");
@@ -144,7 +144,7 @@ main_su(int argc, char *argv[])
   /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,
      unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that build_environment()
      in ptybroker.c will clobber via its own getpwuid() call. */
-  args.user = opt_user;
+  cfg.user = opt_user;
 
   errno = 0;
   pw = getpwnam(opt_user);
@@ -166,7 +166,7 @@ main_su(int argc, char *argv[])
 	  fprintf(stderr, "Out of memory.\n");
 	  return -ENOMEM;
 	}
-      args.chdir = chdir_home;
+      cfg.chdir = chdir_home;
     }
 
   char *shell = opt_shell ?: ((pw->pw_shell && pw->pw_shell[0]) ? pw->pw_shell : "/bin/sh");
@@ -191,7 +191,7 @@ main_su(int argc, char *argv[])
      field in config_t / "executable" in ptybroker.c), while the first element of 'commandLine' is only ever
      used as argv[0], so login-shell semantics are requested the same way su does it, by prefixing argv[0]
      with a dash. */
-  args.executable = shell;
+  cfg.executable = shell;
 
   _cleanup_free_ char *argv0 = NULL;
   if (opt_login)
@@ -229,5 +229,5 @@ main_su(int argc, char *argv[])
     cmdline[i++] = argv[n + j];
   cmdline[i] = NULL;
 
-  return run_pty_session(&args, cmdline);
+  return run_pty_session(&cfg, cmdline);
 }

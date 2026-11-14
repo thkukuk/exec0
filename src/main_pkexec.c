@@ -29,7 +29,7 @@ main_pkexec(int argc, char *argv[])
 {
   _cleanup_free_ char *resolved_path = NULL;
   _cleanup_free_ char *chdir_home = NULL;
-  config_t args = {};
+  config_t cfg = {};
   char *opt_user = "root";
   bool opt_keep_cwd = false;
   char **cmdline = NULL;
@@ -43,7 +43,7 @@ main_pkexec(int argc, char *argv[])
 
   /* Load /etc/exec0/pkexec.conf (or /usr/share/exec0/pkexec.conf) first, so its settings act as
      defaults that the command line parsed below can still override. */
-  cfg_err = read_config("pkexec", &args);
+  cfg_err = read_config("pkexec", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "pkexec: failed to read configuration: %s\n", econf_errString(cfg_err));
 
@@ -78,7 +78,7 @@ main_pkexec(int argc, char *argv[])
       else if (streq(argv[n], "--keep-cwd"))
 	opt_keep_cwd = true;
       else if (streq(argv[n], "-v") || streq(argv[n], "--verbose"))
-	args.verbose = true;
+	cfg.verbose = true;
       else
 	break;
     }
@@ -95,7 +95,7 @@ main_pkexec(int argc, char *argv[])
   /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,
      unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that build_environment()
      in ptybroker.c will clobber via its own getpwuid() call. */
-  args.user = opt_user;
+  cfg.user = opt_user;
 
   /* Like pkexec, default to the target user's home directory; --keep-cwd keeps ours (exec0's own default,
      see working_directory_to_json() in ptybroker.c). */
@@ -107,7 +107,7 @@ main_pkexec(int argc, char *argv[])
 	  fprintf(stderr, "Out of memory.\n");
 	  return -ENOMEM;
 	}
-      args.chdir = chdir_home;
+      cfg.chdir = chdir_home;
     }
 
   /* Anything left over is PROGRAM [ARGUMENTS...]; if there is none, leave cmdline NULL so the broker runs
@@ -138,5 +138,5 @@ main_pkexec(int argc, char *argv[])
       cmdline = argv + n;
     }
 
-  return run_pty_session(&args, cmdline);
+  return run_pty_session(&cfg, cmdline);
 }

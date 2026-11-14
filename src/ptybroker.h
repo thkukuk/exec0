@@ -4,4 +4,4 @@
 
 #include "main.h"
 
-extern int run_pty_session(const config_t *args, char **cmdline);
+extern int run_pty_session(const config_t *cfg, char **cmdline);
