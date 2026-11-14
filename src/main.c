@@ -111,37 +111,6 @@ whitelist_add(char **list, const char *name)
   return 0;
 }
 
-/* Joins 'cfg' (a NULL-terminated argv tail) into a single string suitable for "shell -c STRING",
-   quoting any shell metacharacters by backslash-escaping them. */
-char *
-quote_shell_command(char **cfg)
-{
-  size_t size = 1; /* trailing NUL */
-  for (char **a = cfg; *a; a++)
-    size += strlen(*a) * 2 + 1; /* worst case: every byte escaped, plus a separating space */
-
-  char *cmd = malloc(size);
-  if (!cmd)
-    return NULL;
-
-  char *dst = cmd;
-  for (char **a = cfg; *a; a++)
-    {
-      for (const char *s = *a; *s; s++)
-        {
-          if (!isalnum((unsigned char) *s) && *s != '_' && *s != '-' && *s != '$')
-            *dst++ = '\\';
-          *dst++ = *s;
-        }
-      *dst++ = ' ';
-    }
-  if (dst != cmd)
-    dst--; /* replace the trailing separator with the terminating NUL */
-  *dst = '\0';
-
-  return cmd;
-}
-
 static void
 usage_exec0(FILE *fp)
 {
@@ -175,7 +144,6 @@ static int
 main_exec0(int argc, char *argv[])
 {
   _cleanup_free_ char *argv0 = NULL;
-  _cleanup_free_ char *quoted_cmd = NULL;
   _cleanup_free_ char *whitelist = NULL;
   config_t cfg = {};
   bool opt_login = false;
@@ -425,7 +393,7 @@ main_exec0(int argc, char *argv[])
           return -ENOMEM;
         }
 
-      size_t n_cmdline = 1 + (have_cmd ? 2 : 0) + 1;
+      size_t n_cmdline = 1 + (have_cmd ? 2 + (size_t) (argc - n) : 0) + 1;
       _cleanup_free_ char **built = calloc(n_cmdline, sizeof(char *));
       if (!built)
         {
@@ -437,14 +405,14 @@ main_exec0(int argc, char *argv[])
       built[i++] = argv0;
       if (have_cmd)
         {
-          quoted_cmd = quote_shell_command(argv + n);
-          if (!quoted_cmd)
-            {
-              fprintf(stderr, "Out of memory!\n");
-              return -ENOMEM;
-            }
+          /* Login-shell semantics (the dash in argv0) and an explicit command only combine via '-c':
+             rather than re-quoting the command into a single string for the shell to re-parse, hand
+             it the command's argv verbatim as "$0"/"$@" of a trivial '-c' script, the same way the
+             broker's array-typed 'commandLine' already carries it. */
           built[i++] = (char *) "-c";
-          built[i++] = quoted_cmd;
+          built[i++] = (char *) "exec \"$0\" \"$@\"";
+          for (int j = n; j < argc; j++)
+            built[i++] = argv[j];
         }
       built[i] = NULL;
 

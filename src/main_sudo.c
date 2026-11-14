@@ -59,7 +59,6 @@ main_sudo(int argc, char *argv[])
 {
   _cleanup_free_ char *resolved_path = NULL;
   _cleanup_free_ char *argv0 = NULL;
-  _cleanup_free_ char *quoted_cmnd = NULL;
   _cleanup_free_ char *whitelist = NULL;
   config_t cfg = {};
   char *opt_user = "root";
@@ -374,7 +373,7 @@ main_sudo(int argc, char *argv[])
 	  return -ENOMEM;
 	}
 
-      size_t n_cmdline = 1 + (have_cmd ? 2 : 0) + 1;
+      size_t n_cmdline = 1 + (have_cmd ? 2 + (size_t) ((unsigned) argc - n) : 0) + 1;
       _cleanup_free_ char **built = calloc(n_cmdline, sizeof(char *));
       if (!built)
 	{
@@ -386,14 +385,14 @@ main_sudo(int argc, char *argv[])
       built[i++] = argv0;
       if (have_cmd)
 	{
-	  quoted_cmnd = quote_shell_command(argv + n);
-	  if (!quoted_cmnd)
-	    {
-	      fprintf(stderr, "sudo: out of memory\n");
-	      return -ENOMEM;
-	    }
+	  /* Login-shell semantics (the dash in argv0) and an explicit command only combine via '-c':
+	     rather than re-quoting the command into a single string for the shell to re-parse, hand
+	     it the command's argv verbatim as "$0"/"$@" of a trivial '-c' script, the same way the
+	     broker's array-typed 'commandLine' already carries it. */
 	  built[i++] = (char *) "-c";
-	  built[i++] = quoted_cmnd;
+	  built[i++] = (char *) "exec \"$0\" \"$@\"";
+	  for (unsigned j = n; j < (unsigned) argc; j++)
+	    built[i++] = argv[j];
 	}
       built[i] = NULL;
 

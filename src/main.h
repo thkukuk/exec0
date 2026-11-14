@@ -26,7 +26,6 @@ extern char *find_program_in_path(const char *program);
 extern bool is_env_assignment(const char *arg);
 extern bool is_env_list(const char *arg);
 extern int whitelist_add(char **list, const char *name);
-extern char *quote_shell_command(char **cfg);
 
 
 // XXX extern struct config_t *struct_config_free(config_t *cfg);
