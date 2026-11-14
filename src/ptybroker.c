@@ -1124,6 +1124,30 @@ run_pty_session(const config_t *cfg, char **cmdline)
 
   r = forward_pty(cfg, monitor_fd, sigwinch_fd, &watch);
 
+  /* Undo the background tint applied at the start of forward_pty(), regardless of how the session
+     ended: otherwise the terminal is left painted in the session's background color after the command
+     has quit. Resetting the SGR attribute alone is not enough: terminals fill a freshly scrolled-in or
+     newline-created row across its *entire* width with whatever background was current at the time (see
+     the tint_background handling of '\n'/'\r' in osc2811_scan()), so the row the next prompt appears on
+     is likely already painted in the tint color before we even get here. Erase it, the same way the
+     initial tint is applied with a trailing "\x1b[K" at the start of forward_pty(). */
+  if (shall_tint_background(cfg))
+    {
+      static const char reset[] = "\x1b[0m\x1b[K";
+      ssize_t off = 0;
+      while (off < (ssize_t) sizeof reset - 1)
+        {
+          ssize_t w = write(STDOUT_FILENO, reset + off, sizeof reset - 1 - off);
+          if (w < 0)
+            {
+              if (errno == EINTR)
+                continue;
+              break; /* best-effort: a failure here shouldn't abort the whole session */
+            }
+          off += w;
+        }
+    }
+
   restore_terminal();
 
 
