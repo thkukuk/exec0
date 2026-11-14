@@ -87,8 +87,10 @@
       <varlistentry>
         <term><option>--description</option> <replaceable>text</replaceable></term>
         <listitem>
-          <para>Set a human-readable description for the pty session, shown in the polkit
-          authentication prompt.</para>
+          <para>Set a human-readable description for the pty session. It is stored by
+          <citerefentry><refentrytitle>systemd-ptybrokerd</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+          as metadata of the session and shown by tools that list or inspect its tracked
+	  pseudo-terminals, such as <command>ptyctl list</command>.</para>
         </listitem>
       </varlistentry>
 
