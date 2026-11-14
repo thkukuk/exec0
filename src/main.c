@@ -343,7 +343,7 @@ main_exec0(int argc, char *argv[])
           else
             cfg.background_color = argv[n];
         }
-      else if (arg[0] == '-' && arg[1] != '\0')
+      else if (arg[0] == '-')
         {
           fprintf(stderr, "exec0: invalid option -- '%s'\n", arg + (arg[1] == '-' ? 2 : 1));
           usage_exec0(stderr);
