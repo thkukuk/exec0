@@ -6,6 +6,10 @@ LANG=C.UTF-8
 # directory not being accessible to the target user, which is a directory-permission question, not
 # something sudo(exec0) itself needs to care about.
 echo "Test 6: User switching (-u)"
+if ! getent passwd test0 >/dev/null 2>&1; then
+    echo "✗ SKIP: user test0 not available"
+    exit 77
+fi
 if ./sudo -D /tmp -u test0 whoami | tr -d '\r' | grep -q "^test0$"; then
     echo "✓ PASS: User switching works"
 else
