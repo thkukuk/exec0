@@ -143,11 +143,47 @@ env_has(char **env, size_t n, const char *name)
   return false;
 }
 
+// Formats "name=value" and appends it to env via env_add().
+static int
+env_add_pair(char ***envp, size_t *n, const char *name, const char *value)
+{
+  _cleanup_free_ char *kv = NULL;
+
+  if (asprintf(&kv, "%s=%s", name, value) < 0)
+    return -ENOMEM;
+
+  return env_add(envp, n, &kv);
+}
+
+// Forwards the named variable from our own environment into env, if it is set there.
+static int
+env_forward(char ***envp, size_t *n, const char *name)
+{
+  const char *value = getenv(name);
+
+  if (!value)
+    return 0;
+
+  return env_add_pair(envp, n, name, value);
+}
+
+/* Sets "name=value" in env, unless cfg->preserve_environment already forwarded an existing value for
+   'name' verbatim, in which case that one wins and nothing is added. Used for the fixed set of
+   variables build_environment() tops the environment off with (SHELL_PROMPT_PREFIX, SUDO_USER,
+   SUDO_UID, SUDO_GID). */
+static int
+env_set_default(char ***envp, size_t *n, bool preserve_environment, const char *name, const char *value)
+{
+  if (preserve_environment && env_has(*envp, *n, name))
+    return 0;
+
+  return env_add_pair(envp, n, name, value);
+}
+
 /* Builds the environment to hand to the shell on the backend side. By
    default this is a small, curated set of variables forwarded from the
-   own environment if set, plus anything named by cfg->whitelist_env
-   (su(1)'s -w/--whitelist-environment); if cfg->preserve_environment
-   is set instead (su(1)'s -p/--preserve-environment), the whole environment
+   own environment if set, plus anything named by cfg->whitelist_env.
+   If cfg->preserve_environment is set instead, the whole environment
    is forwarded verbatim. In both cases this is topped off with
    SHELL_PROMPT_PREFIX defaulting to a fixed marker if the caller didn't
    already customize it, and SUDO_USER/SUDO_UID/SUDO_GID identifying the
@@ -163,6 +199,7 @@ build_environment(const config_t *cfg, char ***ret_env)
 
   _cleanup_(strv_freep) char **env = NULL;
   size_t n = 0;
+  int r;
 
   if (cfg->preserve_environment)
     {
@@ -176,7 +213,7 @@ build_environment(const config_t *cfg, char ***ret_env)
 	  if (!kv)
 	    return -ENOMEM;
 
-	  int r = env_add(&env, &n, &kv);
+	  r = env_add(&env, &n, &kv);
 	  if (r < 0)
 	    return r;
 	}
@@ -185,15 +222,7 @@ build_environment(const config_t *cfg, char ***ret_env)
     {
       for (size_t i = 0; i < sizeof pass_through / sizeof pass_through[0]; i++)
 	{
-	  const char *value = getenv(pass_through[i]);
-	  if (!value)
-	    continue;
-
-	  _cleanup_free_ char *kv = NULL;
-	  if (asprintf(&kv, "%s=%s", pass_through[i], value) < 0)
-	    return -ENOMEM;
-
-	  int r = env_add(&env, &n, &kv);
+	  r = env_forward(&env, &n, pass_through[i]);
 	  if (r < 0)
 	    return r;
 	}
@@ -207,75 +236,42 @@ build_environment(const config_t *cfg, char ***ret_env)
 	  char *saveptr = NULL;
 	  for (char *name = strtok_r(copy, ",", &saveptr); name; name = strtok_r(NULL, ",", &saveptr))
 	    {
-	      const char *value = getenv(name);
-	      if (!value)
-		continue;
-
-	      _cleanup_free_ char *kv = NULL;
-	      if (asprintf(&kv, "%s=%s", name, value) < 0)
-		return -ENOMEM;
-
-	      int r = env_add(&env, &n, &kv);
+	      r = env_forward(&env, &n, name);
 	      if (r < 0)
 		return r;
 	    }
 	}
     }
 
+  /* Mark the shell as privileged in the prompt, like run0 does: forward the caller's own prefix if they
+     already customized it, otherwise fall back to a default one. */
+  const char *prompt_prefix = getenv("SHELL_PROMPT_PREFIX");
+  r = env_set_default(&env, &n, cfg->preserve_environment, "SHELL_PROMPT_PREFIX", prompt_prefix ?: "\U0001F9B8 ");
+  if (r < 0)
+    return r;
+
   errno = 0;
   struct passwd *pw = getpwuid(getuid());
   // XXX error check
 
-  /* Mark the shell as privileged in the prompt, like run0 does: forward the caller's own prefix if they
-     already customized it, otherwise fall back to a default one. */
-  if (!cfg->preserve_environment || !env_has(env, n, "SHELL_PROMPT_PREFIX"))
+  if (pw)
     {
-      const char *prompt_prefix = getenv("SHELL_PROMPT_PREFIX");
-      _cleanup_free_ char *kv = NULL;
-
-      if (asprintf(&kv, "SHELL_PROMPT_PREFIX=%s", prompt_prefix ?: "\U0001F9B8 ") < 0)
-	return -ENOMEM;
-
-      int r = env_add(&env, &n, &kv);
+      r = env_set_default(&env, &n, cfg->preserve_environment, "SUDO_USER", pw->pw_name);
       if (r < 0)
 	return r;
     }
 
-  if (pw && (!cfg->preserve_environment || !env_has(env, n, "SUDO_USER")))
-    {
-      _cleanup_free_ char *kv = NULL;
+  char uid_buf[sizeof "4294967295"], gid_buf[sizeof "4294967295"];
+  snprintf(uid_buf, sizeof uid_buf, "%u", (unsigned) getuid());
+  snprintf(gid_buf, sizeof gid_buf, "%u", (unsigned) getgid());
 
-      if (asprintf(&kv, "SUDO_USER=%s", pw->pw_name) < 0)
-	return -ENOMEM;
+  r = env_set_default(&env, &n, cfg->preserve_environment, "SUDO_UID", uid_buf);
+  if (r < 0)
+    return r;
 
-      int r = env_add(&env, &n, &kv);
-      if (r < 0)
-	return r;
-    }
-
-  if (!cfg->preserve_environment || !env_has(env, n, "SUDO_UID"))
-    {
-      _cleanup_free_ char *kv = NULL;
-
-      if (asprintf(&kv, "SUDO_UID=%u", (unsigned) getuid()) < 0)
-	return -ENOMEM;
-
-      int r = env_add(&env, &n, &kv);
-      if (r < 0)
-	return r;
-    }
-
-  if (!cfg->preserve_environment || !env_has(env, n, "SUDO_GID"))
-    {
-      _cleanup_free_ char *kv = NULL;
-
-      if (asprintf(&kv, "SUDO_GID=%u", (unsigned) getgid()) < 0)
-	return -ENOMEM;
-
-      int r = env_add(&env, &n, &kv);
-      if (r < 0)
-	return r;
-    }
+  r = env_set_default(&env, &n, cfg->preserve_environment, "SUDO_GID", gid_buf);
+  if (r < 0)
+    return r;
 
   *ret_env = TAKE_PTR(env);
   return 0;
