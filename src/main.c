@@ -88,6 +88,31 @@ is_env_list(const char *arg)
   return true;
 }
 
+// Checks that 'str' is formatted like an ANSI SGR color parameter string, i.e. that it consists of one or
+// more sequences of ASCII digits separated by semicolons (^[0-9]+(;[0-9]+)*$). Used to validate
+// --background/"background" values before they are ever written into an escape sequence sent to a
+// terminal, rejecting anything that could inject other text or a different kind of escape code.
+bool
+looks_like_ansi_color_code(const char *str)
+{
+  bool prev_char_was_digit = false;
+
+  if (strlen(str) > BACKGROUND_COLOR_MAX_LEN)
+    return false;
+
+  for (; *str; str++)
+    {
+      if (isdigit((unsigned char) *str))
+        prev_char_was_digit = true;
+      else if (prev_char_was_digit && *str == ';')
+        prev_char_was_digit = false;
+      else
+        return false;
+    }
+
+  return prev_char_was_digit;
+}
+
 // Appends 'name' to the comma-separated list in '*list' (which may be NULL), growing it as needed.
 int
 whitelist_add(char **list, const char *name)
@@ -260,6 +285,25 @@ main_exec0(int argc, char *argv[])
               return -EINVAL;
             }
           cfg.description = argv[n];
+        }
+      else if (streq(arg, "--background"))
+        {
+          if (++n >= argc)
+            {
+              fprintf(stderr, "exec0: option requires an argument -- 'background'\n");
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          if (isempty(argv[n]))
+            cfg.background_color = NULL; /* explicitly clear whatever the configuration file set */
+          else if (!looks_like_ansi_color_code(argv[n]))
+            {
+              fprintf(stderr, "exec0: invalid --background argument -- '%s'\n", argv[n]);
+              usage_exec0(stderr);
+              return -EINVAL;
+            }
+          else
+            cfg.background_color = argv[n];
         }
       else if (arg[0] == '-' && arg[1] != '\0')
         {

@@ -473,13 +473,15 @@ set_raw_terminal(void)
    reflected report, which must be ignored and passed through as-is per spec) is left untouched. */
 
 enum {
-  OSC_GROUND,   /* plain text */
-  OSC_ESC,      /* saw ESC, waiting to see whether this is an OSC introducer ("]") */
-  OSC_BODY,     /* inside an OSC body, collecting until a terminator (BEL, or ESC "\") */
-  OSC_BODY_ESC, /* inside an OSC body, saw ESC, waiting to see whether it completes "ESC \" (ST) */
+  OSC_GROUND,    /* plain text */
+  OSC_ESC,       /* saw ESC, waiting to see whether this is an OSC introducer ("]") */
+  OSC_BODY,      /* inside an OSC body, collecting until a terminator (BEL, or ESC "\") */
+  OSC_BODY_ESC,  /* inside an OSC body, saw ESC, waiting to see whether it completes "ESC \" (ST) */
+  CSI_SEQUENCE,  /* inside a CSI sequence (ESC "["), collecting parameter/intermediate bytes */
 };
 
 #define OSC_BODY_MAX 256
+#define CSI_BODY_MAX 192
 
 typedef struct {
   int state;
@@ -496,6 +498,15 @@ typedef struct {
      isatty(STDOUT_FILENO); piped into anything else, they would otherwise show up as literal garbage
      in the output. */
   bool pass_through_unknown;
+
+  /* Background color tinting (--background / the "background" config setting): if set, the ANSI SGR
+     parameter string (e.g. "44" or "48;5;142") to tint the terminal background with. 'tint_background' is
+     precomputed once (also factoring in whether tinting is actually possible/wanted, see
+     run_pty_session()), so the hot path below only ever needs to check this one flag. */
+  const char *background_color;
+  bool tint_background;
+  char csi_buf[CSI_BODY_MAX];
+  size_t csi_len;
 } Osc2811Scanner;
 
 /* Parses the payload of an OSC sequence (the bytes between the introducer and the terminator, NUL
@@ -611,9 +622,95 @@ osc2811_handle_body(Osc2811Scanner *osc, int monitor_fd, bool *ret_excise)
   return 0;
 }
 
+/* Appends an SGR sequence that (re-)applies the background color to 'out', and returns the number of bytes
+   written. Only ever called with osc->tint_background set, i.e. osc->background_color is non-NULL. */
+static size_t
+append_background_tint(const Osc2811Scanner *osc, char *out)
+{
+  size_t len = 0;
+
+  out[len++] = '\x1b';
+  out[len++] = '[';
+  size_t l = strlen(osc->background_color);
+  memcpy(out + len, osc->background_color, l);
+  len += l;
+  out[len++] = 'm';
+
+  return len;
+}
+
+/* Parses the parameter string of a CSI "m" (SGR, "Select Graphic Rendition") sequence, e.g. "0" or
+   "38;5;142", and determines whether it resets the background back to the terminal's default (as opposed to
+   leaving it alone, or setting it to something else). Used to decide whether our own background color needs
+   to be patched back in right after it. */
+static bool
+is_csi_background_reset_sequence(const char *seq)
+{
+  enum { TOKEN_NONE, TOKEN_START, TOKEN_8BIT, TOKEN_24BIT_R, TOKEN_24BIT_G, TOKEN_24BIT_B } token_state = TOKEN_NONE;
+  bool reset = false;
+
+  for (;;)
+    {
+      size_t l = strcspn(seq, ";");
+      char token[16];
+
+      if (l >= sizeof token)
+	l = sizeof token - 1;
+      memcpy(token, seq, l);
+      token[l] = '\0';
+
+      switch (token_state)
+	{
+	case TOKEN_NONE:
+	  if (streq(token, "") || streq(token, "0") || streq(token, "00") || streq(token, "49"))
+	    reset = true; /* these tokens reset the background back to normal */
+	  else if (streq(token, "40") || streq(token, "41") || streq(token, "42") || streq(token, "43") ||
+		   streq(token, "44") || streq(token, "45") || streq(token, "46") || streq(token, "47") ||
+		   streq(token, "48"))
+	    reset = false; /* and these set it to something other than normal */
+
+	  if (streq(token, "38") || streq(token, "48") || streq(token, "58"))
+	    token_state = TOKEN_START; /* an 8bit or 24bit color spec follows */
+	  break;
+
+	case TOKEN_START:
+	  if (streq(token, "5") || streq(token, "05"))
+	    token_state = TOKEN_8BIT;
+	  else if (streq(token, "2") || streq(token, "02"))
+	    token_state = TOKEN_24BIT_R;
+	  else
+	    token_state = TOKEN_NONE;
+	  break;
+
+	case TOKEN_24BIT_R:
+	  token_state = TOKEN_24BIT_G;
+	  break;
+	case TOKEN_24BIT_G:
+	  token_state = TOKEN_24BIT_B;
+	  break;
+
+	case TOKEN_8BIT:
+	case TOKEN_24BIT_B:
+	  token_state = TOKEN_NONE;
+	  break;
+	}
+
+      seq += l;
+      if (*seq == '\0')
+	break;
+      seq++; /* skip ';' */
+    }
+
+  return reset;
+}
+
 /* Scans 'n' freshly read bytes from the monitor connection, writing everything that isn't a recognized OSC
-   2811 request to 'out' (which must have room for at least n + OSC_BODY_MAX + 16 bytes), and acting on, and
-   excising, any request found. Returns the number of bytes written to 'out', or <0 on error. */
+   2811 request to 'out' (which must have room for at least n + OSC_BODY_MAX + 16 bytes, or, if background
+   tinting is enabled, n * (BACKGROUND_COLOR_MAX_LEN + 4) + OSC_BODY_MAX + CSI_BODY_MAX bytes: the worst case
+   is a buffer of nothing but newlines, each of which may grow into a full SGR sequence setting the
+   background color back), and acting on, and excising, any request found; also patches background-tinting
+   SGR sequences into the stream when osc->tint_background is set (see run_pty_session()). Returns the number
+   of bytes written to 'out', or <0 on error. */
 static ssize_t
 osc2811_scan(Osc2811Scanner *osc, int monitor_fd, const char *in, size_t n, char *out)
 {
@@ -629,7 +726,14 @@ osc2811_scan(Osc2811Scanner *osc, int monitor_fd, const char *in, size_t n, char
 	  if (c == '\x1b')
 	    osc->state = OSC_ESC;
 	  else
-	    out[out_len++] = c;
+	    {
+	      out[out_len++] = c;
+	      /* Right after a newline or carriage return, re-assert the background color: terminals
+		 typically paint freshly scrolled-in lines with their own default background, not
+		 whatever was last set via SGR. */
+	      if ((c == '\n' || c == '\r') && osc->tint_background)
+		out_len += append_background_tint(osc, out + out_len);
+	    }
 	  break;
 	case OSC_ESC:
 	  if (c == ']')
@@ -637,10 +741,64 @@ osc2811_scan(Osc2811Scanner *osc, int monitor_fd, const char *in, size_t n, char
 	      osc->state = OSC_BODY;
 	      osc->body_len = 0;
 	    }
+	  else if (c == '[' && osc->background_color)
+	    {
+	      osc->state = CSI_SEQUENCE;
+	      osc->csi_len = 0;
+	    }
 	  else
 	    {
 	      out[out_len++] = '\x1b';
 	      out[out_len++] = c;
+	      osc->state = OSC_GROUND;
+	      /* "ESC c" is a full terminal reset ("RIS"), which also clears the background color. */
+	      if (c == 'c' && osc->tint_background)
+		out_len += append_background_tint(osc, out + out_len);
+	    }
+	  break;
+	case CSI_SEQUENCE:
+	  if (c >= 0x20 && c <= 0x3f)
+	    {
+	      if (osc->csi_len >= sizeof osc->csi_buf - 1)
+		{
+		  /* Way longer than any legitimate CSI sequence: give up, flush verbatim. */
+		  out[out_len++] = '\x1b';
+		  out[out_len++] = '[';
+		  memcpy(out + out_len, osc->csi_buf, osc->csi_len);
+		  out_len += osc->csi_len;
+		  out[out_len++] = c;
+		  osc->state = OSC_GROUND;
+		}
+	      else
+		osc->csi_buf[osc->csi_len++] = c;
+	    }
+	  else
+	    {
+	      /* The CSI sequence is over: 'c' is its final byte. Flush it verbatim, except for an SGR
+		 ("m") sequence that resets the background, where the fix is patched directly into it
+		 (so e.g. a colored prompt followed by a plain reset keeps a single escape sequence), and
+		 a "CSI ! p" soft reset ("DECSTR"), which, like the full reset above, also needs a fresh
+		 background color sequence appended after it. */
+	      osc->csi_buf[osc->csi_len] = '\0';
+
+	      out[out_len++] = '\x1b';
+	      out[out_len++] = '[';
+	      memcpy(out + out_len, osc->csi_buf, osc->csi_len);
+	      out_len += osc->csi_len;
+
+	      if (c == 'm' && osc->tint_background && is_csi_background_reset_sequence(osc->csi_buf))
+		{
+		  out[out_len++] = ';';
+		  size_t l = strlen(osc->background_color);
+		  memcpy(out + out_len, osc->background_color, l);
+		  out_len += l;
+		}
+
+	      out[out_len++] = c;
+
+	      if (c == 'p' && osc->tint_background && streq(osc->csi_buf, "!"))
+		out_len += append_background_tint(osc, out + out_len);
+
 	      osc->state = OSC_GROUND;
 	    }
 	  break;
@@ -732,15 +890,38 @@ make_sigwinch_fd(void)
   return fd;
 }
 
+/* Whether background tinting (--background, or the "background" setting from the configuration file)
+   should actually be applied: only makes sense when our output is going to a terminal, and honours
+   $NO_COLOR, the same convention terminal_settings_to_json() already reports to the broker via
+   envNO_COLOR. */
+static bool
+shall_tint_background(const config_t *cfg)
+{
+  const char *no_color;
+
+  if (isempty(cfg->background_color))
+    return false;
+
+  if (!isatty(STDOUT_FILENO))
+    return false;
+
+  no_color = getenv("NO_COLOR");
+  if (no_color && no_color[0])
+    return false;
+
+  return true;
+}
+
 /* Copies bytes between our own stdin/stdout and the monitor connection, until the monitor connection is
    closed (i.e. the session ends) *and* (if 'watch' is given and actually watching anything) the backend
    unit has reported its final exit status: the PTY closing and the unit's D-Bus state settling are two
    independent, racy notifications of the same underlying event (the backend process exiting), and the exit
    status is only available from the latter (see unitwatch.h). Also filters OSC 2811 terminal-size-change
-   traffic out of the monitor connection and replies to it (see osc2811_scan()), and reports SIGWINCH-driven
-   resizes of our own terminal the same way. */
+   traffic out of the monitor connection and replies to it (see osc2811_scan()), reports SIGWINCH-driven
+   resizes of our own terminal the same way, and, if cfg->background_color is set and shall_tint_background()
+   agrees, tints the terminal background with it for the duration of the session. */
 static int
-forward_pty(int monitor_fd, int sigwinch_fd, UnitWatch *watch)
+forward_pty(const config_t *cfg, int monitor_fd, int sigwinch_fd, UnitWatch *watch)
 {
   struct pollfd pollfds[4] = {
     { .fd = STDIN_FILENO, .events = POLLIN },
@@ -749,8 +930,37 @@ forward_pty(int monitor_fd, int sigwinch_fd, UnitWatch *watch)
     { .fd = watch ? unit_watch_get_fd(watch) : -1, .events = POLLIN },
   };
 
-  Osc2811Scanner osc = { .pass_through_unknown = isatty(STDOUT_FILENO) };
+  bool tint_background = shall_tint_background(cfg);
+  Osc2811Scanner osc = {
+    .pass_through_unknown = isatty(STDOUT_FILENO),
+    .background_color = cfg->background_color,
+    .tint_background = tint_background,
+  };
   bool pty_done = false;
+
+  if (tint_background)
+    {
+      /* Set the initial background color, and erase to the end of the (first) line with it, same as
+	 systemd's run0 does. */
+      char seq[8 + BACKGROUND_COLOR_MAX_LEN + 4];
+      int len = snprintf(seq, sizeof seq, "\x1b[%sm\x1b[K", cfg->background_color);
+
+      if (len > 0 && (size_t) len < sizeof seq)
+	{
+	  ssize_t off = 0;
+	  while (off < len)
+	    {
+	      ssize_t w = write(STDOUT_FILENO, seq + off, (size_t) len - off);
+	      if (w < 0)
+		{
+		  if (errno == EINTR)
+		    continue;
+		  break; /* best-effort: a failure here shouldn't abort the whole session */
+		}
+	      off += w;
+	    }
+	}
+    }
 
   for (;;)
     {
@@ -838,7 +1048,10 @@ forward_pty(int monitor_fd, int sigwinch_fd, UnitWatch *watch)
 	    }
 	  if (n > 0)
 	    {
-	      char filtered[sizeof buf + OSC_BODY_MAX + 16];
+	      /* See osc2811_scan()'s doc comment for why this needs to be this generous when tinting is
+		 enabled: worst case, every single byte read is a newline, each of which can grow into a
+		 full SGR sequence re-asserting the background color. */
+	      char filtered[sizeof buf * (BACKGROUND_COLOR_MAX_LEN + 4) + OSC_BODY_MAX + CSI_BODY_MAX];
 	      ssize_t flen = osc2811_scan(&osc, monitor_fd, buf, (size_t) n, filtered);
 	      if (flen < 0)
 		return (int) flen;
@@ -909,7 +1122,7 @@ run_pty_session(const config_t *cfg, char **cmdline)
         }
     }
 
-  r = forward_pty(monitor_fd, sigwinch_fd, &watch);
+  r = forward_pty(cfg, monitor_fd, sigwinch_fd, &watch);
 
   restore_terminal();
 
