@@ -206,7 +206,6 @@ help_exec0(void)
 static int
 main_exec0(int argc, char *argv[])
 {
-  _cleanup_free_ char *argv0 = NULL;
   _cleanup_free_ char *whitelist = NULL;
   config_t cfg = {};
   bool opt_login = false;
@@ -432,6 +431,7 @@ main_exec0(int argc, char *argv[])
      login shell). */
   if (opt_login || opt_shell || !have_cmd)
     {
+      _cleanup_free_ char *argv0 = NULL;
       char *shell;
 
       if (opt_shell)
