@@ -144,14 +144,9 @@ main_su(int argc, char *argv[])
      in ptybroker.c will clobber via its own getpwuid() call. */
   cfg.user = opt_user;
 
-  errno = 0;
-  pw = getpwnam(opt_user);
-  if (!pw)
-    {
-      r = errno ? -errno : -ENOENT;
-      fprintf(stderr, "su: user %s does not exist\n", opt_user);
-      return r;
-    }
+  r = lookup_user_and_group(opt_user, cfg.group, &pw);
+  if (r < 0)
+    return r;
 
   /* Unlike pkexec, su by default stays in the caller's current directory (exec0's own default, see
      working_directory_to_json() in ptybroker.c); only --login switches to the target user's home, same as

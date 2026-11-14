@@ -81,14 +81,9 @@ main_pkexec(int argc, char *argv[])
 	break;
     }
 
-  errno = 0;
-  pw = getpwnam(opt_user);
-  if (!pw)
-    {
-      r = errno?-errno:-ENOENT;
-      fprintf(stderr, "User `%s' does not exist.\n", opt_user);
-      return r;
-    }
+  r = lookup_user_and_group(opt_user, NULL, &pw);
+  if (r < 0)
+    return r;
 
   /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,
      unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that build_environment()

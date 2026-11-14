@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <pwd.h>
 #include <stdbool.h>
 #include <libeconf.h>
 
@@ -28,6 +29,8 @@ extern int main_sudo(int argc, char *argv[]);
 extern int main_pkexec(int argc, char *argv[]);
 
 extern char *find_program_in_path(const char *program);
+extern int lookup_user_and_group(const char *username, const char *groupname,
+                                 struct passwd **ret_pw);
 extern bool is_env_assignment(const char *arg);
 extern bool is_env_list(const char *arg);
 extern int whitelist_add(char **list, const char *name);

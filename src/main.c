@@ -3,6 +3,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <grp.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
@@ -39,6 +40,43 @@ find_program_in_path(const char *program)
     }
 
   return NULL;
+}
+
+/* Looks up 'username' and, if given, 'groupname', reporting any lookup
+   failure to stderr. On success, '*ret_pw' is set to the user's passwd
+   entry and 0 is returned; on failure, a negative errno is returned and
+   '*ret_pw' is left untouched. */
+int
+lookup_user_and_group(const char *username, const char *groupname,
+                      struct passwd **ret_pw)
+{
+  int r;
+
+  errno = 0;
+  struct passwd *pw = getpwnam(username);
+  if (!pw)
+    {
+      r = errno ? -errno : -ENOENT;
+      fprintf(stderr, "User '%s' does not exist: %s\n", username, strerror(-r));
+      return r;
+    }
+
+  if (!isempty(groupname))
+    {
+      errno = 0;
+      if (!getgrnam(groupname))
+        {
+          r = errno ? -errno : -ENOENT;
+
+          fprintf(stderr, "Group '%s' does not exist: %s\n", groupname, strerror(-r));
+          return r;
+        }
+    }
+
+  if (ret_pw)
+    *ret_pw = pw;
+
+  return 0;
 }
 
 // Environment variables always start with a letter, can contain '_' and end with '='
@@ -370,18 +408,12 @@ main_exec0(int argc, char *argv[])
 
   bool have_cmd = n < argc;
 
-  errno = 0;
-  struct passwd *pw = getpwnam(isempty(cfg.user)?"root":cfg.user);
-  if (!pw)
-    {
-      r = errno ? -errno : -ENOENT;
-      fprintf(stderr, "User %s does not exist (%s)\n", cfg.user, strerror(-r));
-      return r;
-    }
+  struct passwd *pw;
+  r = lookup_user_and_group(isempty(cfg.user)?"root":cfg.user, cfg.group, &pw);
+  if (r < 0)
+    return r;
 
-  if (cfg.preserve_environment)
-    cfg.preserve_environment = true;
-  else if (whitelist)
+  if (whitelist && !cfg.preserve_environment)
     cfg.whitelist_env = whitelist;
 
   if (opt_login && !cfg.chdir)

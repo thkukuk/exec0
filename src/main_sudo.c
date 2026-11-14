@@ -275,14 +275,9 @@ main_sudo(int argc, char *argv[])
      build_environment() in ptybroker.c will clobber via its own getpwuid() call. */
   cfg.user = opt_user;
 
-  errno = 0;
-  pw = getpwnam(opt_user);
-  if (!pw)
-    {
-      r = errno ? -errno : -ENOENT;
-      fprintf(stderr, "sudo: user %s does not exist\n", opt_user);
-      return r;
-    }
+  r = lookup_user_and_group(opt_user, cfg.group, &pw);
+  if (r < 0)
+    return r;
 
   if (opt_set_home)
     {
