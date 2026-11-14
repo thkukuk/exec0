@@ -375,6 +375,13 @@ main_exec0(int argc, char *argv[])
   if (opt_login && !cfg.chdir)
     cfg.chdir = pw->pw_dir;
 
+  /* Plain "exec0 -i" with no command: leave 'executable' and 'commandLine' both unset, so the
+     broker falls back to its own default shell semantics, i.e. an interactive login shell for the
+     target user. This also makes polkit authorization prompts show "(login shell)" instead of the
+     literal "-<shell>" command line we would otherwise have to construct ourselves. */
+  if (opt_login && !have_cmd)
+    return run_pty_session(&cfg, NULL);
+
   /* Plain "exec0" with nothing else given runs a shell, same as "-s": go through the same
      shell-building code path below so it gets a non-login shell, rather than leaving 'executable'
      and 'commandLine' both unset, which asks the broker for its own default shell semantics (a
