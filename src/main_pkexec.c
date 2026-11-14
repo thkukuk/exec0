@@ -16,25 +16,34 @@
 #include "ptybroker.h"
 
 static void
+usage_pkexec(FILE *fp)
+{
+  fprintf(fp,
+	  "pkexec [--keep-cwd] [--user username] [PROGRAM] [ARGUMENTS...]\n"
+	  "pkexec  --version | --help\n");
+}
+
+static void
 help_pkexec(void)
 {
-  printf("pkexec --version |\n"
-	 "       --help |\n"
-	 "       --disable-internal-agent |\n"
-	 "       [-v | --verbose] [--keep-cwd] [--user username] [PROGRAM] [ARGUMENTS...]\n");
+  usage_pkexec(stdout);
+  printf("\nExecute a command as another user through systemd-ptybrokerd.\n\n"
+	 "      --disable-internal-agent  Accepted for command-line compatibility; has no effect.\n"
+         "      --help                    Display this help message and exit\n"
+	 "      --keep-cwd                Stay in current directroy\n"
+         "  -u, --user <user>             Run command as the specified user (default: root)\n"
+         "  -v, --verbose                 Print verbose information\n"
+         "      --version                 Show version and exit\n");
 }
 
 int
 main_pkexec(int argc, char *argv[])
 {
-  _cleanup_free_ char *resolved_path = NULL;
-  _cleanup_free_ char *chdir_home = NULL;
   config_t cfg = {};
   char *opt_user = "root";
   bool opt_keep_cwd = false;
-  char **cmdline = NULL;
   struct passwd *pw;
-  unsigned n;
+  int n;
   int r;
   econf_err cfg_err;
 
@@ -45,7 +54,7 @@ main_pkexec(int argc, char *argv[])
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "pkexec: failed to read configuration: %s\n", econf_errString(cfg_err));
 
-  for (n = 1; n < (unsigned) argc; n++)
+  for (n = 1; n < argc; n++)
     {
       if (streq(argv[n], "--help"))
 	{
@@ -60,9 +69,10 @@ main_pkexec(int argc, char *argv[])
       else if (streq(argv[n], "--user") || streq(argv[n], "-u"))
 	{
 	  n++;
-	  if (n >= (unsigned) argc)
+	  if (n >= argc)
 	    {
-	      help_pkexec();
+	      fprintf(stderr, "pkexec: option requires an argument -- 'u'\n");
+	      usage_pkexec(stderr);
 	      return -EINVAL;
 	    }
 	  opt_user = argv[n];
@@ -77,6 +87,12 @@ main_pkexec(int argc, char *argv[])
 	opt_keep_cwd = true;
       else if (streq(argv[n], "-v") || streq(argv[n], "--verbose"))
 	cfg.verbose = true;
+      else if (argv[n][0] == '-')
+        {
+          fprintf(stderr, "pkexec: invalid option -- '%s'\n", argv[n] + (argv[n][1] == '-' ? 2 : 1));
+          usage_pkexec(stderr);
+          return -EINVAL;
+        }
       else
 	break;
     }
@@ -85,51 +101,39 @@ main_pkexec(int argc, char *argv[])
   if (r < 0)
     return r;
 
-  /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,
-     unlike 'pw', which is backed by a static buffer getpwnam(3)/getpwuid(3) share and that build_environment()
-     in ptybroker.c will clobber via its own getpwuid() call. */
   cfg.user = opt_user;
 
-  /* Like pkexec, default to the target user's home directory; --keep-cwd keeps ours (exec0's own default,
-     see working_directory_to_json() in ptybroker.c). */
   if (!opt_keep_cwd)
     {
-      chdir_home = strdup(pw->pw_dir);
-      if (!chdir_home)
+      cfg.chdir = strdup(pw->pw_dir);
+      if (!cfg.chdir)
 	{
 	  fprintf(stderr, "Out of memory.\n");
 	  return -ENOMEM;
 	}
-      cfg.chdir = chdir_home;
     }
 
-  /* Anything left over is PROGRAM [ARGUMENTS...]; if there is none, leave cmdline NULL so the broker runs
-     the target user's login shell, same as plain exec0 does for the caller's own shell. */
-  if (n < (unsigned) argc)
+  // No PROGRAM to run, use standard shell
+  if (n >= argc)
+    return run_pty_session(&cfg, NULL);
+
+  // Anything left over is PROGRAM [ARGUMENTS...]
+  if (argv[n][0] != '/')
     {
-      char *path = argv[n];
-
-      if (path[0] != '/')
+      _cleanup_free_ char *resolved_path = find_program_in_path(argv[n]);
+      if (!resolved_path)
 	{
-	  resolved_path = find_program_in_path(path);
-	  if (!resolved_path)
-	    {
-	      fprintf(stderr, "Cannot run program %s: %s\n", path, strerror(ENOENT));
-	      return -ENOENT;
-	    }
-	  path = resolved_path;
+	  fprintf(stderr, "Command not found: '%s'\n", argv[n]);
+	  return -ENOENT;
 	}
-
-      if (access(path, F_OK) != 0)
-	{
-	  r = -errno;
-	  fprintf(stderr, "Error accessing %s: %s\n", path, strerror(-r));
-	  return r;
-	}
-
-      argv[n] = path;
-      cmdline = argv + n;
+      argv[n] = TAKE_PTR(resolved_path);
+    }
+  else if (access(argv[n], F_OK) != 0)
+    {
+      r = -errno;
+      fprintf(stderr, "Error accessing '%s': %s\n", argv[n], strerror(-r));
+      return r;
     }
 
-  return run_pty_session(&cfg, cmdline);
+  return run_pty_session(&cfg, argv + n);
 }
