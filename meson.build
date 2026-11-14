@@ -16,6 +16,8 @@ project(
   version : '0.1',
 )
 
+bindir = get_option('bindir')
+
 conf = configuration_data()
 conf.set_quoted('VERSION', meson.project_version())
 conf.set_quoted('PACKAGE', meson.project_name())
@@ -62,8 +64,7 @@ exec0_exe = executable('exec0',
            install : false)
 
 # Build-tree symlinks, so the test suite below can invoke ./su, ./pkexec and ./sudo directly without
-# needing 'ninja install' first; this is independent of whether they get installed (see
-# compat-symlink below).
+# needing 'meson install' first; this is independent of whether they get installed or not
 wrapper_symlinks = []
 foreach name : ['su', 'pkexec', 'sudo']
   wrapper_symlinks += custom_target(name,
@@ -73,17 +74,22 @@ foreach name : ['su', 'pkexec', 'sudo']
              build_by_default : true)
 endforeach
 
-if get_option('compat-symlink')
+if get_option('pkexec-compat')
   install_symlink('pkexec',
                   pointing_to: 'exec0',
-                  install_dir: 'bin')
+                  install_dir: bindir)
+endif
+if get_option('su-compat')
   install_symlink('su',
                   pointing_to: 'exec0',
-                  install_dir: 'bin')
+                  install_dir: bindir)
+endif
+if get_option('sudo-compat')
   install_symlink('sudo',
                   pointing_to: 'exec0',
-                  install_dir: 'bin')
+                  install_dir: bindir)
 endif
 
+subdir('man')
 subdir('polkit')
 subdir('tests')

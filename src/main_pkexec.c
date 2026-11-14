@@ -41,8 +41,6 @@ main_pkexec(int argc, char *argv[])
   if (argc < 1)
     return -EINVAL;
 
-  /* Load /etc/exec0/pkexec.conf (or /usr/share/exec0/pkexec.conf) first, so its settings act as
-     defaults that the command line parsed below can still override. */
   cfg_err = read_config("pkexec", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "pkexec: failed to read configuration: %s\n", econf_errString(cfg_err));

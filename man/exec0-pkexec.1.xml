@@ -1,0 +1,104 @@
+<refentry xmlns="http://docbook.org/ns/docbook" version="5.0" xml:id="exec0-pkexec">
+  <refmeta>
+    <refentrytitle>exec0-pkexec</refentrytitle>
+    <manvolnum>1</manvolnum>
+    <refmiscinfo class="source">exec0-wrappers %version%</refmiscinfo>
+    <refmiscinfo class="manual">User Commands</refmiscinfo>
+  </refmeta>
+
+  <refnamediv>
+    <refname>exec0-pkexec</refname>
+    <refpurpose>run a command with substitute user ID via PtyBroker emulating pkexec</refpurpose>
+  </refnamediv>
+
+  <refsynopsisdiv>
+    <cmdsynopsis>
+      <command>exec0-pkexec</command>
+      <arg choice="opt" rep="repeat"><replaceable>options</replaceable></arg>
+      <arg choice="opt"><replaceable>program</replaceable>
+        <arg choice="opt" rep="repeat"><replaceable>arguments</replaceable></arg>
+      </arg>
+    </cmdsynopsis>
+  </refsynopsisdiv>
+
+  <refsect1 xml:id="description">
+    <title>Description</title>
+    <para>
+      <command>exec0-pkexec</command> uses
+      <citerefentry>
+        <refentrytitle>systemd-ptybrokerd</refentrytitle><manvolnum>8</manvolnum>
+      </citerefentry> to execute a command as another user. It tries to emulate the
+      <citerefentry>
+        <refentrytitle>pkexec</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry> behavior as good as possible.
+    </para>
+  </refsect1>
+
+  <refsect1 xml:id="options">
+    <title>Options</title>
+    <variablelist>
+      <varlistentry>
+        <term><option>--keep-cwd</option></term>
+        <listitem>
+          <para>Stay in current directory.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-u</option></term>
+        <term><option>--user</option> <replaceable>user</replaceable></term>
+        <listitem>
+          <para>Switches to the specified <replaceable>user</replaceable> instead of root.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--disable-internal-agent</option></term>
+        <listitem>
+          <para>Accepted for command-line compatibility; has no effect.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-v</option></term>
+        <term><option>--verbose</option></term>
+        <listitem>
+          <para>Show additional information.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--help</option></term>
+        <listitem>
+          <para>Display help text and exit.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--version</option></term>
+        <listitem>
+          <para>Display version and exit.</para>
+        </listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>SEE ALSO</title>
+    <para>
+      <citerefentry>
+        <refentrytitle>exec0</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>,
+      <citerefentry>
+        <refentrytitle>pkexec</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>,
+      <citerefentry>
+        <refentrytitle>exec0-su</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>,
+      <citerefentry>
+        <refentrytitle>exec0-sudo</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>
+    </para>
+  </refsect1>
+
+</refentry>

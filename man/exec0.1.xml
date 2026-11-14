@@ -1,0 +1,230 @@
+<refentry xmlns="http://docbook.org/ns/docbook" version="5.0" xml:id="exec0">
+  <refmeta>
+    <refentrytitle>exec0</refentrytitle>
+    <manvolnum>1</manvolnum>
+    <refmiscinfo class="source">exec0-wrappers %version%</refmiscinfo>
+    <refmiscinfo class="manual">User Commands</refmiscinfo>
+  </refmeta>
+
+  <refnamediv>
+    <refname>exec0</refname>
+    <refpurpose>run a shell or command as another user via PtyBroker</refpurpose>
+  </refnamediv>
+
+  <refsynopsisdiv>
+    <cmdsynopsis>
+      <command>exec0</command>
+      <arg choice="opt" rep="repeat"><replaceable>options</replaceable></arg>
+      <arg choice="opt" rep="repeat"><replaceable>VAR=value</replaceable></arg>
+      <arg choice="opt">
+        <replaceable>command</replaceable>
+        <arg choice="opt" rep="repeat"><replaceable>argument</replaceable></arg>
+      </arg>
+    </cmdsynopsis>
+  </refsynopsisdiv>
+
+  <refsect1 xml:id="description">
+    <title>Description</title>
+    <para>
+      <command>exec0</command> runs a shell or a command as another user, by default
+      <literal>root</literal>, using
+      <citerefentry>
+        <refentrytitle>systemd-ptybrokerd</refentrytitle><manvolnum>8</manvolnum>
+      </citerefentry>. Authentication and authorization are handled by polkit, which the broker
+      consults before allocating a pseudo-terminal and running the requested command or shell on
+      <command>exec0</command>'s behalf.
+    </para>
+    <para>
+      Unlike <citerefentry><refentrytitle>su</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>sudo</refentrytitle><manvolnum>8</manvolnum></citerefentry> or
+      <citerefentry><refentrytitle>pkexec</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+      <command>exec0</command> is not setuid itself and does not need to raise any privileges in the
+      calling process: the privileged part of the work is done by
+      <citerefentry><refentrytitle>systemd-ptybrokerd</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+      over its own, separate IPC mechanism. This makes <command>exec0</command> a working alternative
+      to <command>su</command>, <command>sudo</command> and <command>pkexec</command> on systems, or
+      for processes, that have the Linux <literal>NoNewPrivs</literal> flag set, which otherwise
+      prevents setuid binaries from gaining privileges.
+    </para>
+    <para>
+      <command>exec0</command> is also the real binary behind the
+      <citerefentry><refentrytitle>exec0-pkexec</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>exec0-su</refentrytitle><manvolnum>1</manvolnum></citerefentry> and
+      <citerefentry><refentrytitle>exec0-sudo</refentrytitle><manvolnum>1</manvolnum></citerefentry>
+      wrappers, which are only different command lines on top of the same mechanism; invoked as plain
+      <command>exec0</command>, it uses its own native command line described below rather than
+      emulating any other tool.
+    </para>
+    <para>
+      With no <replaceable>command</replaceable> given, <command>exec0</command> runs a shell for the
+      target user, the same as <option>-s</option>/<option>--shell</option>.
+    </para>
+  </refsect1>
+
+  <refsect1 xml:id="options">
+    <title>Options</title>
+    <variablelist>
+      <varlistentry>
+        <term><option>--background</option> <replaceable>color</replaceable></term>
+        <listitem>
+          <para>Set an ANSI SGR color parameter string (e.g. <literal>1;44</literal>) to use as the
+          terminal background for the session. An empty string clears a background color set by the
+          configuration file.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-D</option></term>
+        <term><option>--chdir</option> <replaceable>directory</replaceable></term>
+        <listitem>
+          <para>Change the working directory before running the command. By default,
+          <command>exec0</command> stays in the caller's current directory, except with
+          <option>-i</option>/<option>--login</option>, which switches to the target user's home
+          directory unless overridden by this option.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--description</option> <replaceable>text</replaceable></term>
+        <listitem>
+          <para>Set a human-readable description for the pty session, shown in the polkit
+          authentication prompt.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-E</option></term>
+        <term><option>--preserve-env</option></term>
+        <term><option>--preserve-env</option> <replaceable>list</replaceable></term>
+        <listitem>
+          <para>Preserve the whole calling environment when running the command. If a
+          comma-separated <replaceable>list</replaceable> of variable names is given instead, only
+          those variables are preserved, the rest of the environment is reset. Cannot be combined
+          with <option>-i</option>/<option>--login</option>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-g</option></term>
+        <term><option>--group</option> <replaceable>group</replaceable></term>
+        <listitem>
+          <para>Run the command with <replaceable>group</replaceable> as primary group, instead of
+          the target user's own primary group.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-h</option></term>
+        <term><option>--help</option></term>
+        <listitem>
+          <para>Display help text and exit.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-i</option></term>
+        <term><option>--login</option></term>
+        <listitem>
+          <para>Run a login shell as the target user. Implies switching to the target user's home
+          directory, unless <option>-D</option>/<option>--chdir</option> is also given. Cannot be
+          combined with <option>-s</option>/<option>--shell</option> or
+          <option>-E</option>/<option>--preserve-env</option>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--name</option> <replaceable>name</replaceable></term>
+        <listitem>
+          <para>Set the name of the pty session.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-q</option></term>
+        <term><option>--quiet</option></term>
+        <listitem>
+          <para>Be quiet; disables <option>-v</option>/<option>--verbose</option>, including when the
+          latter was enabled by the configuration file.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-s</option></term>
+        <term><option>--shell</option></term>
+        <listitem>
+          <para>Run a shell as the target user. This is the default when no
+          <replaceable>command</replaceable> is given.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-u</option></term>
+        <term><option>--user</option> <replaceable>user</replaceable></term>
+        <listitem>
+          <para>Run the command as the specified <replaceable>user</replaceable> instead of
+          <literal>root</literal>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-v</option></term>
+        <term><option>--verbose</option></term>
+        <listitem>
+          <para>Print additional information.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-V</option></term>
+        <term><option>--version</option></term>
+        <listitem>
+          <para>Display version and exit.</para>
+        </listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect1>
+
+  <refsect1 xml:id="env">
+    <title>Environment</title>
+    <para>
+      Any <replaceable>VAR=value</replaceable> arguments before <replaceable>command</replaceable>
+      are set in the environment passed to it, the same way
+      <citerefentry><refentrytitle>sudo</refentrytitle><manvolnum>8</manvolnum></citerefentry> treats
+      leading assignments; unless <option>-E</option>/<option>--preserve-env</option> is also used to
+      preserve the whole environment, each assignment is implicitly added to the set of preserved
+      variables.
+    </para>
+  </refsect1>
+
+  <refsect1 xml:id="files">
+    <title>Files</title>
+    <para>
+      <filename>/etc/exec0/exec0.conf</filename>, and the other configuration directories handled by
+      <citerefentry><refentrytitle>libeconf</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
+      are read for defaults. A <literal>[Global]</literal> section applies to
+      <command>exec0</command> and all wrappers; a section named after the invoked tool (e.g.
+      <literal>[exec0]</literal>) overrides it. Recognized keys are <literal>verbose</literal>
+      (boolean) and <literal>background</literal> (an ANSI SGR color parameter string, see
+      <option>--background</option> above), both overridable on the command line.
+    </para>
+  </refsect1>
+
+  <refsect1>
+    <title>SEE ALSO</title>
+    <para>
+      <citerefentry>
+        <refentrytitle>systemd-ptybrokerd</refentrytitle><manvolnum>8</manvolnum>
+      </citerefentry>,
+      <citerefentry>
+        <refentrytitle>exec0-pkexec</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>,
+      <citerefentry>
+        <refentrytitle>exec0-su</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>,
+      <citerefentry>
+        <refentrytitle>exec0-sudo</refentrytitle><manvolnum>1</manvolnum>
+      </citerefentry>
+    </para>
+  </refsect1>
+
+</refentry>

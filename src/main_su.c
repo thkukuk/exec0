@@ -53,8 +53,6 @@ main_su(int argc, char *argv[])
   if (argc < 1)
     return -EINVAL;
 
-  /* Load /etc/exec0/su.conf (or /usr/share/exec0/su.conf) first, so its settings act as defaults
-     that the command line parsed below can still override. */
   cfg_err = read_config("su", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "su: failed to read configuration: %s\n", econf_errString(cfg_err));
