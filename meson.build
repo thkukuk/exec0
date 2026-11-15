@@ -22,8 +22,9 @@ conf = configuration_data()
 conf.set_quoted('VERSION', meson.project_version())
 conf.set_quoted('PACKAGE', meson.project_name())
 
+pkg = import('pkgconfig')
 cc = meson.get_compiler('c')
-inc = include_directories(['include'])
+inc = include_directories(['include', 'lib'])
 
 add_project_arguments(['-D_GNU_SOURCE=1',
                        '-DXTSTRINGDEFINES',
@@ -56,10 +57,35 @@ libeconf = dependency('libeconf')
 
 configure_file(output: 'config.h', configuration: conf)
 
+libexec0_map = 'lib/libexec0.map'
+libexec0_map_version = '-Wl,--version-script,@0@/@1@'.format(meson.current_source_dir(), libexec0_map)
+
+libexec0 = shared_library(
+  'exec0',
+  ['lib/drop_privs.c'],
+  include_directories : inc,
+  link_args : ['-shared',
+               libexec0_map_version],
+  link_depends : libexec0_map,
+  dependencies : [libsystemd],
+  install : true,
+  version : meson.project_version(),
+  soversion : '0'
+)
+# install_headers('include/libexec0.h')
+
+pkg.generate(
+  libexec0,
+  name : 'libexec0',
+  description : 'library to run a command or shell via PtyBroker',
+  version : meson.project_version(),
+)
+
 exec0_exe = executable('exec0',
            ['src/main.c', 'src/main_pkexec.c', 'src/main_su.c', 'src/main_sudo.c',
             'src/ptybroker.c', 'src/polkit.c', 'src/unitwatch.c', 'src/read_config.c'],
            include_directories : inc,
+           link_with : libexec0,
            dependencies : [libsystemd, libeconf],
            install : false)
 

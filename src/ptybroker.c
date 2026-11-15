@@ -26,6 +26,7 @@
 #include "polkit.h"
 #include "ptybroker.h"
 #include "unitwatch.h"
+#include "drop_privs.h"
 
 
 #define VARLINK_SOCKET "/run/systemd/io.systemd.PTYBroker"
@@ -53,13 +54,13 @@ terminal_settings_to_json(sd_json_variant **ret)
                         SD_JSON_BUILD_PAIR_CONDITION(have_winsize, "lines", SD_JSON_BUILD_UNSIGNED(ws.ws_row)));
 }
 
-/* Builds the WorkingDirectory object for AcquirePty(): either the path given via --chdir, or, like run0,
-   the directory we were invoked from (rather than the target user's home directory). */
+/* Builds the WorkingDirectory object for AcquirePty(): either the path
+   given via --chdir, or the directory we were invoked from. */
 static int
-working_directory_to_json(const config_t *cfg, sd_json_variant **ret)
+working_directory_to_json(const char *chdir, sd_json_variant **ret)
 {
   _cleanup_free_ char *cwd = NULL;
-  const char *path = cfg->chdir;
+  const char *path = chdir;
 
   if (!path)
     {
@@ -167,7 +168,7 @@ env_forward(char ***envp, size_t *n, const char *name)
   return env_add_pair(envp, n, name, value);
 }
 
-/* Sets "name=value" in env, unless cfg->preserve_environment already forwarded an existing value for
+/* Sets "name=value" in env, unless preserve_environment already forwarded an existing value for
    'name' verbatim, in which case that one wins and nothing is added. Used for the fixed set of
    variables build_environment() tops the environment off with (SHELL_PROMPT_PREFIX, SUDO_USER,
    SUDO_UID, SUDO_GID). */
@@ -182,18 +183,18 @@ env_set_default(char ***envp, size_t *n, bool preserve_environment, const char *
 
 /* Builds the environment to hand to the shell on the backend side. By
    default this is a small, curated set of variables forwarded from the
-   own environment if set, plus anything named by cfg->whitelist_env.
-   If cfg->preserve_environment is set instead, the whole environment
-   is forwarded verbatim. In both cases this is topped off with
-   SHELL_PROMPT_PREFIX defaulting to a fixed marker if the caller didn't
-   already customize it, and SUDO_USER/SUDO_UID/SUDO_GID identifying the
-   real, invoking user, for compatibility with scripts that only know how
-   to look for sudo's conventions, unless those are already present (which,
-   with cfg->preserve_environment, they may well be).
+   own environment if set, plus anything named by whitelist_env.
+   If preserve_env is set instead, the whole environment is forwarded
+   verbatim. In both cases this is topped off with SHELL_PROMPT_PREFIX
+   defaulting to a fixed marker if the caller didn't already customize it,
+   and SUDO_USER/SUDO_UID/SUDO_GID identifying the real, invoking user,
+   for compatibility with scripts that only know how to look for sudo's
+   conventions, unless those are already present (which, with preserve_env,
+   they may well be).
 
    Returns 0 and sets *ret_env on success, a negative errno on failure. */
 static int
-build_environment(const config_t *cfg, char ***ret_env)
+build_environment(bool preserve_env, const char *whitelist_env, char ***ret_env)
 {
   static const char *const pass_through[] = { "SHELL", "XDG_SESSION_CLASS" };
 
@@ -201,7 +202,7 @@ build_environment(const config_t *cfg, char ***ret_env)
   size_t n = 0;
   int r;
 
-  if (cfg->preserve_environment)
+  if (preserve_env)
     {
       for (char **e = environ; e && *e; e++)
 	{
@@ -227,9 +228,9 @@ build_environment(const config_t *cfg, char ***ret_env)
 	    return r;
 	}
 
-      if (cfg->whitelist_env)
+      if (whitelist_env)
 	{
-	  _cleanup_free_ char *copy = strdup(cfg->whitelist_env);
+	  _cleanup_free_ char *copy = strdup(whitelist_env);
 	  if (!copy)
 	    return -ENOMEM;
 
@@ -246,7 +247,7 @@ build_environment(const config_t *cfg, char ***ret_env)
   /* Mark the shell as privileged in the prompt, like run0 does: forward the caller's own prefix if they
      already customized it, otherwise fall back to a default one. */
   const char *prompt_prefix = getenv("SHELL_PROMPT_PREFIX");
-  r = env_set_default(&env, &n, cfg->preserve_environment, "SHELL_PROMPT_PREFIX", prompt_prefix ?: "\U0001F9B8 ");
+  r = env_set_default(&env, &n, preserve_env, "SHELL_PROMPT_PREFIX", prompt_prefix ?: "\U0001F9B8 ");
   if (r < 0)
     return r;
 
@@ -256,7 +257,7 @@ build_environment(const config_t *cfg, char ***ret_env)
 
   if (pw)
     {
-      r = env_set_default(&env, &n, cfg->preserve_environment, "SUDO_USER", pw->pw_name);
+      r = env_set_default(&env, &n, preserve_env, "SUDO_USER", pw->pw_name);
       if (r < 0)
 	return r;
     }
@@ -265,11 +266,11 @@ build_environment(const config_t *cfg, char ***ret_env)
   snprintf(uid_buf, sizeof uid_buf, "%u", (unsigned) getuid());
   snprintf(gid_buf, sizeof gid_buf, "%u", (unsigned) getgid());
 
-  r = env_set_default(&env, &n, cfg->preserve_environment, "SUDO_UID", uid_buf);
+  r = env_set_default(&env, &n, preserve_env, "SUDO_UID", uid_buf);
   if (r < 0)
     return r;
 
-  r = env_set_default(&env, &n, cfg->preserve_environment, "SUDO_GID", gid_buf);
+  r = env_set_default(&env, &n, preserve_env, "SUDO_GID", gid_buf);
   if (r < 0)
     return r;
 
@@ -315,7 +316,7 @@ acquire_shell_pty(const config_t *cfg, char **cmdline,
     }
 
   _cleanup_(sd_json_variant_unrefp) sd_json_variant *working_directory = NULL;
-  r = working_directory_to_json(cfg, &working_directory);
+  r = working_directory_to_json(cfg->chdir, &working_directory);
   if (r < 0)
     {
       fprintf(stderr, "Failed to determine working directory: %s\n", strerror(-r));
@@ -323,7 +324,7 @@ acquire_shell_pty(const config_t *cfg, char **cmdline,
     }
 
   _cleanup_(strv_freep) char **environment = NULL;
-  r = build_environment(cfg, &environment);
+  r = build_environment(cfg->preserve_environment, cfg->whitelist_env, &environment);
   if (r < 0)
     {
       fprintf(stderr, "Failed to build environment: %s\n", strerror(-r));
@@ -1084,6 +1085,11 @@ run_pty_session(const config_t *cfg, char **cmdline)
   _cleanup_close_ int monitor_fd = -EBADF;
   _cleanup_free_ char *unit = NULL;
   int r;
+
+  // drop privileges for the case the binary is e.g. setuid
+  r = drop_privs();
+  if (r < 0)
+    return r;
 
   r = acquire_shell_pty(cfg, cmdline, &monitor_fd, &unit);
   if (r < 0)

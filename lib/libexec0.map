@@ -1,0 +1,5 @@
+LIBEXEC0_0.1 {
+  global:
+	drop_privs;
+  local: *;
+};
