@@ -52,7 +52,7 @@ possible_cc_flags = [
                   ]
 add_project_arguments(cc.get_supported_arguments(possible_cc_flags), language : 'c')
 
-libsystemd = dependency('libsystemd', version : '>= 257')
+libsystemd = dependency('libsystemd', version : '>= 262')
 libeconf = dependency('libeconf')
 
 configure_file(output: 'config.h', configuration: conf)
