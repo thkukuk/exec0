@@ -47,14 +47,11 @@ main_pkexec(int argc, char *argv[])
   int r;
   econf_err cfg_err;
 
-  if (argc < 1)
-    return -EINVAL;
-
   cfg_err = read_config("pkexec", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "pkexec: failed to read configuration: %s\n", econf_errString(cfg_err));
 
-  for (n = 1; n < argc; n++)
+  for (n = 0; n < argc; n++)
     {
       if (streq(argv[n], "--help"))
 	{

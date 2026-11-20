@@ -16,7 +16,7 @@ export TEST_VAR
 mc() { :; }
 export -f mc
 
-if ./sudo -E printenv TEST_VAR | grep -q "test123"; then
+if ./exec0 --mode=sudo -E printenv TEST_VAR | grep -q "test123"; then
     echo "✓ PASS: -E still preserves normal variables with a shell function exported"
 else
     echo "✗ FAIL: -E failed while a shell function was exported"

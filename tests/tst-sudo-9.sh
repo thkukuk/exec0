@@ -4,7 +4,7 @@ LANG=C.UTF-8
 
 # Test 9: Error handling for missing arguments
 echo "Test 9: Error handling for missing arguments"
-if ./sudo -u 2>&1 | grep -q "option requires an argument" && ./sudo -u 2>&1 | grep -q "^usage:"; then
+if ./exec0 --mode=sudo -u 2>&1 | grep -q "option requires an argument" && ./exec0 --mode=sudo -u 2>&1 | grep -q "^usage:"; then
     echo "✓ PASS: Missing arguments are properly handled"
 else
     echo "✗ FAIL: Missing argument handling failed"

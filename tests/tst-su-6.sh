@@ -7,8 +7,8 @@ echo -e "\nTest 6: Specific environment variable preservation"
 TEST1="value1"
 TEST2="value2"
 export TEST1 TEST2
-if ./su -l -w TEST1,TEST2 -c printenv | grep -q "TEST1" && \
-   ./su -l -w TEST1,TEST2 -c printenv | grep -q "TEST2"; then
+if ./exec0 --mode=su -l -w TEST1,TEST2 -c printenv | grep -q "TEST1" && \
+   ./exec0 --mode=su -l -w TEST1,TEST2 -c printenv | grep -q "TEST2"; then
     echo "✓ PASS: Specific environment variable preservation works"
 else
     echo "✗ FAIL: Specific environment variable preservation failed"

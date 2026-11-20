@@ -46,18 +46,15 @@ main_su(int argc, char *argv[])
   bool opt_login = false;
   bool opt_fast = false;
   struct passwd *pw;
-  unsigned n;
+  int n;
   int r;
   econf_err cfg_err;
-
-  if (argc < 1)
-    return -EINVAL;
 
   cfg_err = read_config("su", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "su: failed to read configuration: %s\n", econf_errString(cfg_err));
 
-  for (n = 1; n < (unsigned) argc; n++)
+  for (n = 0; n < argc; n++)
     {
       if (streq(argv[n], "-h") || streq(argv[n], "--help"))
 	{
@@ -78,7 +75,7 @@ main_su(int argc, char *argv[])
       else if (streq(argv[n], "-c") || streq(argv[n], "--command") || streq(argv[n], "--session-command"))
 	{
 	  n++;
-	  if (n >= (unsigned) argc)
+	  if (n >= argc)
 	    {
 	      help_su();
 	      return -EINVAL;
@@ -88,7 +85,7 @@ main_su(int argc, char *argv[])
       else if (streq(argv[n], "-s") || streq(argv[n], "--shell"))
 	{
 	  n++;
-	  if (n >= (unsigned) argc)
+	  if (n >= argc)
 	    {
 	      help_su();
 	      return -EINVAL;
@@ -98,7 +95,7 @@ main_su(int argc, char *argv[])
       else if (streq(argv[n], "-g") || streq(argv[n], "--group"))
 	{
 	  n++;
-	  if (n >= (unsigned) argc)
+	  if (n >= argc)
 	    {
 	      help_su();
 	      return -EINVAL;
@@ -108,7 +105,7 @@ main_su(int argc, char *argv[])
       else if (streq(argv[n], "-w") || streq(argv[n], "--whitelist-environment"))
 	{
 	  n++;
-	  if (n >= (unsigned) argc)
+	  if (n >= argc)
 	    {
 	      help_su();
 	      return -EINVAL;
@@ -136,7 +133,7 @@ main_su(int argc, char *argv[])
 	break; /* first non-option argument: the target user */
     }
 
-  if (n < (unsigned) argc)
+  if (n < argc)
     opt_user = argv[n++];
 
   /* 'opt_user' points into argv[] (or the "root" literal), so it stays valid for the life of the process,

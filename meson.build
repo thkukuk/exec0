@@ -89,17 +89,6 @@ exec0_exe = executable('exec0',
            dependencies : [libsystemd, libeconf],
            install : false)
 
-# Build-tree symlinks, so the test suite below can invoke ./su, ./pkexec and ./sudo directly without
-# needing 'meson install' first; this is independent of whether they get installed or not
-wrapper_symlinks = []
-foreach name : ['su', 'pkexec', 'sudo']
-  wrapper_symlinks += custom_target(name,
-             output : name,
-             command : ['ln', '-sf', 'exec0', '@OUTPUT@'],
-             depends : exec0_exe,
-             build_by_default : true)
-endforeach
-
 if get_option('pkexec-compat')
   install_symlink('pkexec',
                   pointing_to: 'exec0',

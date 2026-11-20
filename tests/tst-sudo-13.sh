@@ -7,15 +7,15 @@ LANG=C.UTF-8
 # are deliberately excluded from this: systemd itself treats those as a clean shutdown for a service of
 # this type, the same way run0 does.)
 echo "Test 13: Exit status propagation"
-./sudo true
+./exec0 --mode=sudo true
 rc1=$?
-./sudo false
+./exec0 --mode=sudo false
 rc2=$?
-./sudo sh -c 'exit 22'
+./exec0 --mode=sudo sh -c 'exit 22'
 rc3=$?
-./sudo sh -c 'kill -KILL $$'
+./exec0 --mode=sudo sh -c 'kill -KILL $$'
 rc4=$?
-./sudo sh -c 'kill -SEGV $$'
+./exec0 --mode=sudo sh -c 'kill -SEGV $$'
 rc5=$?
 if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 1 ] && [ "$rc3" -eq 22 ] && [ "$rc4" -eq 137 ] && [ "$rc5" -eq 139 ]; then
     echo "✓ PASS: Exit status propagation works"

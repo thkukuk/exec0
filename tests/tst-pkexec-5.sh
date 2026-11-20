@@ -5,9 +5,9 @@ LANG=C.UTF-8
 # Test 5: pkexec(exec0) reports death by an "unclean" signal as 128+signal, the same convention $? uses for
 # a directly run command.
 echo -e "\nTest 5: Exit status propagation (killed by signal)"
-./pkexec sh -c 'kill -KILL $$'
+./exec0 --mode=pkexec sh -c 'kill -KILL $$'
 rc1=$?
-./pkexec sh -c 'kill -SEGV $$'
+./exec0 --mode=pkexec sh -c 'kill -SEGV $$'
 rc2=$?
 if [ "$rc1" -eq 137 ] && [ "$rc2" -eq 139 ]; then
     echo "✓ PASS: Signal exit status propagation works"

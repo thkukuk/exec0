@@ -216,16 +216,13 @@ main_exec0(int argc, char *argv[])
   int r;
   econf_err cfg_err;
 
-  if (argc < 1)
-    return -EINVAL;
-
   /* Load /etc/exec0/exec0.conf (or /usr/share/exec0/exec0.conf) first, so its settings act as
      defaults that the command line parsed below can still override. */
   cfg_err = read_config("exec0", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "exec0: failed to read configuration: %s\n", econf_errString(cfg_err));
 
-  for (n = 1; n < argc; n++)
+  for (n = 0; n < argc; n++)
     {
       char *arg = argv[n];
 
@@ -520,12 +517,23 @@ int
 main (int argc, char **argv)
 {
   int r;
+  const char *progname = basename(argv[0]);
 
-  if (streq(basename(argv[0]), "pkexec"))
+  argc--;
+  argv++;
+
+  if (argc >= 1 && strneq("--mode=", argv[0], 7))
+    {
+      progname = argv[0]+7;
+      argc--;
+      argv++;
+    }
+
+  if (streq(progname, "pkexec"))
     r = main_pkexec(argc, argv);
-  else if (streq(basename(argv[0]), "su"))
+  else if (streq(progname, "su"))
     r = main_su(argc, argv);
-  else if (streq(basename(argv[0]), "sudo"))
+  else if (streq(progname, "sudo"))
     r = main_sudo(argc, argv);
   else
     r = main_exec0(argc, argv);

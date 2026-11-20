@@ -8,9 +8,9 @@ LANG=C.UTF-8
 # regardless of any shell metacharacters they contain, since the login-shell wrapper execs straight
 # into the command rather than re-parsing it through an intermediate shell.
 echo "Test 3: Login shell functionality (-i)"
-if ./sudo -i printenv PROFILEREAD | tr -d '\r' | grep -qx "true" && \
-   ./sudo -i pwd | tr -d '\r' | grep -q "^/root$" && \
-   ./sudo -i bash -c 'echo "$1"' _ 'hello $HOME `whoami`' | tr -d '\r' | grep -qx 'hello $HOME `whoami`'; then
+if ./exec0 --mode=sudo -i printenv PROFILEREAD | tr -d '\r' | grep -qx "true" && \
+   ./exec0 --mode=sudo -i pwd | tr -d '\r' | grep -q "^/root$" && \
+   ./exec0 --mode=sudo -i bash -c 'echo "$1"' _ 'hello $HOME `whoami`' | tr -d '\r' | grep -qx 'hello $HOME `whoami`'; then
     echo "✓ PASS: Login shell sources /etc/profile, changes directory, and passes command arguments through verbatim"
 else
     echo "✗ FAIL: Login shell functionality failed"

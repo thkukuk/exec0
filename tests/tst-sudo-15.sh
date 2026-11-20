@@ -15,8 +15,8 @@ else
     test_shell=/bin/bash
 fi
 
-if SHELL=$test_shell ./sudo -s printenv SHELL | tr -d '\r' | grep -q "^$test_shell$" && \
-   ./sudo -s pwd | tr -d '\r' | grep -q "^$(pwd)$"; then
+if SHELL=$test_shell ./exec0 --mode=sudo -s printenv SHELL | tr -d '\r' | grep -q "^$test_shell$" && \
+   ./exec0 --mode=sudo -s pwd | tr -d '\r' | grep -q "^$(pwd)$"; then
     echo "✓ PASS: -s runs \$SHELL and keeps the working directory"
 else
     echo "✗ FAIL: -s handling failed"

@@ -71,18 +71,15 @@ main_sudo(int argc, char *argv[])
   bool opt_remove_timestamp = false;
   bool opt_validate = false;
   struct passwd *pw;
-  unsigned n;
+  int n;
   int r;
   econf_err cfg_err;
-
-  if (argc < 1)
-    return -EINVAL;
 
   cfg_err = read_config("sudo", &cfg);
   if (cfg_err != ECONF_SUCCESS && cfg_err != ECONF_NOFILE)
     fprintf(stderr, "sudo: failed to read configuration: %s\n", econf_errString(cfg_err));
 
-  for (n = 1; n < (unsigned) argc; n++)
+  for (n = 0; n < argc; n++)
     {
       char *arg = argv[n];
 
@@ -103,7 +100,7 @@ main_sudo(int argc, char *argv[])
 	}
       else if (streq(arg, "-u") || streq(arg, "--user"))
 	{
-	  if (++n >= (unsigned) argc)
+	  if (++n >= argc)
 	    {
 	      fprintf(stderr, "sudo: option requires an argument -- 'u'\n");
 	      usage_sudo(stderr);
@@ -115,7 +112,7 @@ main_sudo(int argc, char *argv[])
 	opt_user = arg + 7;
       else if (streq(arg, "-g") || streq(arg, "--group"))
 	{
-	  if (++n >= (unsigned) argc)
+	  if (++n >= argc)
 	    {
 	      fprintf(stderr, "sudo: option requires an argument -- 'g'\n");
 	      usage_sudo(stderr);
@@ -127,7 +124,7 @@ main_sudo(int argc, char *argv[])
 	cfg.group = arg + 8;
       else if (streq(arg, "-D") || streq(arg, "--chdir"))
 	{
-	  if (++n >= (unsigned) argc)
+	  if (++n >= argc)
 	    {
 	      fprintf(stderr, "sudo: option requires an argument -- 'D'\n");
 	      usage_sudo(stderr);
@@ -205,7 +202,7 @@ main_sudo(int argc, char *argv[])
     }
 
   // sudo without arguments bails out with an error
-  if (n >= (unsigned) argc && !opt_login && !opt_shell_mode && !opt_validate &&
+  if (n >= argc && !opt_login && !opt_shell_mode && !opt_validate &&
       !opt_reset_timestamp && !opt_remove_timestamp)
     {
       fprintf(stderr, "sudo: a command is required\n");
@@ -227,7 +224,7 @@ main_sudo(int argc, char *argv[])
      same as sudo(1): set it in our own environment (so getpwnam()/build_environment() downstream,
      and -E's "preserve everything" below, pick it up) and, unless the whole environment is already
      being preserved, whitelist it explicitly so build_environment() forwards it. */
-  while (n < (unsigned) argc && is_env_assignment(argv[n]))
+  while (n < argc && is_env_assignment(argv[n]))
     {
       char *eq = strchr(argv[n], '=');
 
@@ -245,7 +242,7 @@ main_sudo(int argc, char *argv[])
       n++;
     }
 
-  bool have_cmd = n < (unsigned) argc;
+  bool have_cmd = n < argc;
 
   if (opt_remove_timestamp)
     {
@@ -366,7 +363,7 @@ main_sudo(int argc, char *argv[])
 	  return -ENOMEM;
 	}
 
-      size_t n_cmdline = 1 + (have_cmd ? 2 + (size_t) ((unsigned) argc - n) : 0) + 1;
+      size_t n_cmdline = 1 + (have_cmd ? 2 + (size_t) (argc - n) : 0) + 1;
       _cleanup_free_ char **built = calloc(n_cmdline, sizeof(char *));
       if (!built)
 	{
@@ -384,7 +381,7 @@ main_sudo(int argc, char *argv[])
 	     broker's array-typed 'commandLine' already carries it. */
 	  built[i++] = (char *) "-c";
 	  built[i++] = (char *) "exec \"$0\" \"$@\"";
-	  for (unsigned j = n; j < (unsigned) argc; j++)
+	  for (int j = n; j < argc; j++)
 	    built[i++] = argv[j];
 	}
       built[i] = NULL;
