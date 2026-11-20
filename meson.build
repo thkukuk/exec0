@@ -13,7 +13,7 @@ project(
                   'b_lto=true',
                   'warning_level=2'],
   license : ['GPL-2.0-or-later', 'LGPL-2.1-or-later'],
-  version : '0.1',
+  version : '0.2',
 )
 
 bindir = get_option('bindir')
