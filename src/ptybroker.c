@@ -353,7 +353,7 @@ acquire_shell_pty(const config_t *cfg, char **cmdline,
 				    SD_JSON_BUILD_PAIR_STRING("frontendType", "null"),
 				    SD_JSON_BUILD_PAIR_STRING("backendType", "shell"),
 				    SD_JSON_BUILD_PAIR_BOOLEAN("monitor", true),
-				    SD_JSON_BUILD_PAIR_BOOLEAN("osc2811", true),
+				    SD_JSON_BUILD_PAIR_BOOLEAN("inBandResize", true),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->name, "name", SD_JSON_BUILD_STRING(cfg->name)),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->description, "description", SD_JSON_BUILD_STRING(cfg->description)),
 				    SD_JSON_BUILD_PAIR_CONDITION(!!cfg->user, "user", SD_JSON_BUILD_STRING(cfg->user)),
@@ -459,19 +459,21 @@ set_raw_terminal(void)
   return 0;
 }
 
-/* Implements the client side of UAPI spec 17 ("OSC 2811: Terminal Size Change Notification"), as used on
-   the monitor stream when osc2811 was requested at AcquirePty() time: the broker periodically embeds a
-   "subscribe" sequence (ESC ] 2811 ; ? ; columns=N ; lines=M ST) into the session output it sends us,
-   declaring the dimensions it currently believes are in effect; we reply, only if they actually differ
-   from our terminal's real dimensions, with a "report" sequence (ESC ] 2811 ; columns=N ; lines=M ST) on
-   the same connection, which the broker then applies to the backend pty. A "cancel" (the same request
-   marker, but without any fields) means the broker is no longer interested until the next subscribe. None
-   of these sequences are meant for our own terminal and must not reach it; anything else (including a
-   reflected report, which must be ignored and passed through as-is per spec) is left untouched. */
+/* Implements the client side of the "In-Band Window Resize Notifications" private mode, CSI 2048/48 (see
+   https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83), as used on the monitor stream when
+   inBandResize was requested at AcquirePty() time: the broker enables the mode once, right when the monitor
+   connection is established (and again any time it sees the backend reset its own terminal), by sending
+   "CSI ? 2048 h" (DECSET) into the session output it sends us. We reply, on the same connection, with a
+   size report ("CSI 48 ; lines ; columns ; ypixels ; xpixels t") immediately upon seeing that, and again
+   every time our own terminal is actually resized, until the broker sends "CSI ? 2048 l" (DECRST). The
+   broker only ever sends the mode 2048 DECSET/DECRST bare, never combined with other modes, so matching the
+   CSI body verbatim is sufficient. Neither the enable/disable sequences nor our own reports are meant for
+   our own terminal and must not reach it; any other sequence is left untouched (other than the
+   background-tint patching below). */
 
 enum {
   OSC_GROUND,    /* plain text */
-  OSC_ESC,       /* saw ESC, waiting to see whether this is an OSC introducer ("]") */
+  OSC_ESC,       /* saw ESC, waiting to see whether this is an OSC introducer ("]") or a CSI one ("[") */
   OSC_BODY,      /* inside an OSC body, collecting until a terminator (BEL, or ESC "\") */
   OSC_BODY_ESC,  /* inside an OSC body, saw ESC, waiting to see whether it completes "ESC \" (ST) */
   CSI_SEQUENCE,  /* inside a CSI sequence (ESC "["), collecting parameter/intermediate bytes */
@@ -485,9 +487,11 @@ typedef struct {
   char body[OSC_BODY_MAX];
   size_t body_len;
 
-  /* A pending, unanswered subscription from the broker, and the dimensions it declared. */
-  bool subscribed;
-  unsigned columns, lines;
+  /* Whether the broker currently wants in-band resize reports from us (CSI ?2048h seen, no CSI ?2048l
+     since), and the dimensions we last reported to it, to avoid sending a redundant report for a SIGWINCH
+     that didn't actually change anything. */
+  bool inband_resize_enabled;
+  unsigned reported_columns, reported_lines;
 
   /* Whether unrecognized OSC sequences (e.g. logind's OSC 3008 session-tracking marker, emitted into
      the backend's own output by pam_systemd regardless of whether anyone is watching for it) should be
@@ -504,65 +508,27 @@ typedef struct {
   bool tint_background;
   char csi_buf[CSI_BODY_MAX];
   size_t csi_len;
-} Osc2811Scanner;
+} TerminalScanner;
 
-/* Parses the payload of an OSC sequence (the bytes between the introducer and the terminator, NUL
-   terminated, not including either). Returns 0 if this is not an OSC 2811 subscribe/cancel request (which
-   includes the case where it is a 2811 *report*, reflected back at us: as per spec that must be ignored,
-   i.e. passed through), or the parsed request otherwise. */
+/* If in-band resize reporting is currently enabled and our terminal's real dimensions differ from what was
+   last reported, sends a fresh size report to the broker. Harmless no-op otherwise, including when stdin
+   isn't a terminal or its size can't be determined. */
 static int
-osc2811_parse(const char *seq, bool *ret_cancel, unsigned *ret_columns, unsigned *ret_lines)
+inband_resize_maybe_report(TerminalScanner *ts, int monitor_fd)
 {
-  if (strncmp(seq, "2811", 4) != 0)
-    return 0;
-  const char *p = seq + 4;
-  if (*p != ';' && *p != '\0')
-    return 0; /* some other, unrelated OSC number that merely shares the "2811" prefix */
-
-  if (!(p[0] == ';' && p[1] == '?' && (p[2] == ';' || p[2] == '\0')))
-    return 0; /* no request marker: a report, reflected back at us; ignore/pass through */
-  p += 2;
-
-  unsigned columns = 0, lines = 0;
-  bool any_fields = false;
-  while (p[0] == ';')
-    {
-      p++;
-      size_t n = strcspn(p, ";");
-      if (strncmp(p, "columns=", 8) == 0)
-	columns = (unsigned) strtoul(p + 8, NULL, 10);
-      else if (strncmp(p, "lines=", 6) == 0)
-	lines = (unsigned) strtoul(p + 6, NULL, 10);
-      /* unknown fields are ignored, as per spec */
-      any_fields = true;
-      p += n;
-    }
-
-  *ret_cancel = !any_fields;
-  *ret_columns = columns;
-  *ret_lines = lines;
-  return 1;
-}
-
-/* If a subscription is currently pending and our terminal's real dimensions differ from what the broker
-   declared, sends it a report and marks the subscription consumed (the broker is expected to immediately
-   re-subscribe, declaring the corrected dimensions back at us). Harmless no-op otherwise, including when
-   stdin isn't a terminal or its size can't be determined. */
-static int
-osc2811_maybe_report(Osc2811Scanner *osc, int monitor_fd)
-{
-  if (!osc->subscribed)
+  if (!ts->inband_resize_enabled)
     return 0;
 
   struct winsize ws;
   if (!isatty(STDIN_FILENO) || ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) < 0 || ws.ws_col == 0 || ws.ws_row == 0)
     return 0;
 
-  if (ws.ws_col == osc->columns && ws.ws_row == osc->lines)
+  if (ws.ws_col == ts->reported_columns && ws.ws_row == ts->reported_lines)
     return 0;
 
-  char seq[64];
-  int n = snprintf(seq, sizeof seq, "\x1b]2811;columns=%u;lines=%u\x1b\\", ws.ws_col, ws.ws_row);
+  char seq[40];
+  int n = snprintf(seq, sizeof seq, "\x1b[48;%u;%u;%u;%ut",
+		    ws.ws_row, ws.ws_col, ws.ws_ypixel, ws.ws_xpixel);
   if (n < 0 || (size_t) n >= sizeof seq)
     return -EINVAL;
 
@@ -579,57 +545,38 @@ osc2811_maybe_report(Osc2811Scanner *osc, int monitor_fd)
       off += w;
     }
 
-  osc->subscribed = false;
+  ts->reported_columns = ws.ws_col;
+  ts->reported_lines = ws.ws_row;
   return 1;
 }
 
-/* NUL-terminates and parses the just-completed OSC body. If it's a recognized 2811 request, acts on it
-   (updating the subscription state and replying if appropriate) and reports it as consumed via *ret_excise;
-   otherwise (unrecognized, or a reflected report), *ret_excise is set to the opposite of
-   osc->pass_through_unknown: flushed verbatim for a real terminal to (invisibly) deal with, excised
-   otherwise. */
+/* Called upon seeing "CSI ? 2048 h" or "CSI ? 2048 l" (DECSET/DECRST): updates the enabled state, and, for
+   an enable, forces an immediate report regardless of what was last reported (a fresh enable always expects
+   one, even if the dimensions happen to be unchanged from before the matching disable). */
 static int
-osc2811_handle_body(Osc2811Scanner *osc, int monitor_fd, bool *ret_excise)
+inband_resize_set_enabled(TerminalScanner *ts, int monitor_fd, bool enable)
 {
-  bool cancel;
-  unsigned columns, lines;
+  ts->inband_resize_enabled = enable;
 
-  osc->body[osc->body_len] = 0;
+  if (!enable)
+    return 0;
 
-  if (osc2811_parse(osc->body, &cancel, &columns, &lines) <= 0)
-    {
-      *ret_excise = !osc->pass_through_unknown;
-      return 0;
-    }
-
-  if (cancel)
-    osc->subscribed = false;
-  else
-    {
-      osc->subscribed = true;
-      osc->columns = columns;
-      osc->lines = lines;
-
-      int r = osc2811_maybe_report(osc, monitor_fd);
-      if (r < 0)
-	return r;
-    }
-
-  *ret_excise = true;
-  return 0;
+  ts->reported_columns = 0;
+  ts->reported_lines = 0;
+  return inband_resize_maybe_report(ts, monitor_fd);
 }
 
 /* Appends an SGR sequence that (re-)applies the background color to 'out', and returns the number of bytes
-   written. Only ever called with osc->tint_background set, i.e. osc->background_color is non-NULL. */
+   written. Only ever called with ts->tint_background set, i.e. ts->background_color is non-NULL. */
 static size_t
-append_background_tint(const Osc2811Scanner *osc, char *out)
+append_background_tint(const TerminalScanner *ts, char *out)
 {
   size_t len = 0;
 
   out[len++] = '\x1b';
   out[len++] = '[';
-  size_t l = strlen(osc->background_color);
-  memcpy(out + len, osc->background_color, l);
+  size_t l = strlen(ts->background_color);
+  memcpy(out + len, ts->background_color, l);
   len += l;
   out[len++] = 'm';
 
@@ -701,15 +648,15 @@ is_csi_background_reset_sequence(const char *seq)
   return reset;
 }
 
-/* Scans 'n' freshly read bytes from the monitor connection, writing everything that isn't a recognized OSC
-   2811 request to 'out' (which must have room for at least n + OSC_BODY_MAX + 16 bytes, or, if background
-   tinting is enabled, n * (BACKGROUND_COLOR_MAX_LEN + 4) + OSC_BODY_MAX + CSI_BODY_MAX bytes: the worst case
-   is a buffer of nothing but newlines, each of which may grow into a full SGR sequence setting the
-   background color back), and acting on, and excising, any request found; also patches background-tinting
-   SGR sequences into the stream when osc->tint_background is set (see run_pty_session()). Returns the number
-   of bytes written to 'out', or <0 on error. */
+/* Scans 'n' freshly read bytes from the monitor connection, writing everything that isn't a recognized CSI
+   2048/48 sequence to 'out' (which must have room for at least n + OSC_BODY_MAX + 16 bytes, or, if
+   background tinting is enabled, n * (BACKGROUND_COLOR_MAX_LEN + 4) + OSC_BODY_MAX + CSI_BODY_MAX bytes: the
+   worst case is a buffer of nothing but newlines, each of which may grow into a full SGR sequence setting
+   the background color back), and acting on, and excising, any such sequence found; also patches
+   background-tinting SGR sequences into the stream when ts->tint_background is set (see
+   run_pty_session()). Returns the number of bytes written to 'out', or <0 on error. */
 static ssize_t
-osc2811_scan(Osc2811Scanner *osc, int monitor_fd, const char *in, size_t n, char *out)
+terminal_stream_scan(TerminalScanner *ts, int monitor_fd, const char *in, size_t n, char *out)
 {
   size_t out_len = 0;
 
@@ -717,86 +664,99 @@ osc2811_scan(Osc2811Scanner *osc, int monitor_fd, const char *in, size_t n, char
     {
       char c = in[i];
 
-      switch (osc->state)
+      switch (ts->state)
 	{
 	case OSC_GROUND:
 	  if (c == '\x1b')
-	    osc->state = OSC_ESC;
+	    ts->state = OSC_ESC;
 	  else
 	    {
 	      out[out_len++] = c;
 	      /* Right after a newline or carriage return, re-assert the background color: terminals
 		 typically paint freshly scrolled-in lines with their own default background, not
 		 whatever was last set via SGR. */
-	      if ((c == '\n' || c == '\r') && osc->tint_background)
-		out_len += append_background_tint(osc, out + out_len);
+	      if ((c == '\n' || c == '\r') && ts->tint_background)
+		out_len += append_background_tint(ts, out + out_len);
 	    }
 	  break;
 	case OSC_ESC:
 	  if (c == ']')
 	    {
-	      osc->state = OSC_BODY;
-	      osc->body_len = 0;
+	      ts->state = OSC_BODY;
+	      ts->body_len = 0;
 	    }
-	  else if (c == '[' && osc->background_color)
+	  else if (c == '[')
 	    {
-	      osc->state = CSI_SEQUENCE;
-	      osc->csi_len = 0;
+	      ts->state = CSI_SEQUENCE;
+	      ts->csi_len = 0;
 	    }
 	  else
 	    {
 	      out[out_len++] = '\x1b';
 	      out[out_len++] = c;
-	      osc->state = OSC_GROUND;
-	      /* "ESC c" is a full terminal reset ("RIS"), which also clears the background color. */
-	      if (c == 'c' && osc->tint_background)
-		out_len += append_background_tint(osc, out + out_len);
+	      ts->state = OSC_GROUND;
+	      /* "ESC c" is a full terminal reset ("RIS"), which also clears the background color (and, per
+		 the broker's own handling, CSI 2048/48 itself, though the broker turns that back on again
+		 right away, so we don't need to track it here). */
+	      if (c == 'c' && ts->tint_background)
+		out_len += append_background_tint(ts, out + out_len);
 	    }
 	  break;
 	case CSI_SEQUENCE:
 	  if (c >= 0x20 && c <= 0x3f)
 	    {
-	      if (osc->csi_len >= sizeof osc->csi_buf - 1)
+	      if (ts->csi_len >= sizeof ts->csi_buf - 1)
 		{
 		  /* Way longer than any legitimate CSI sequence: give up, flush verbatim. */
 		  out[out_len++] = '\x1b';
 		  out[out_len++] = '[';
-		  memcpy(out + out_len, osc->csi_buf, osc->csi_len);
-		  out_len += osc->csi_len;
+		  memcpy(out + out_len, ts->csi_buf, ts->csi_len);
+		  out_len += ts->csi_len;
 		  out[out_len++] = c;
-		  osc->state = OSC_GROUND;
+		  ts->state = OSC_GROUND;
 		}
 	      else
-		osc->csi_buf[osc->csi_len++] = c;
+		ts->csi_buf[ts->csi_len++] = c;
 	    }
 	  else
 	    {
-	      /* The CSI sequence is over: 'c' is its final byte. Flush it verbatim, except for an SGR
-		 ("m") sequence that resets the background, where the fix is patched directly into it
-		 (so e.g. a colored prompt followed by a plain reset keeps a single escape sequence), and
-		 a "CSI ! p" soft reset ("DECSTR"), which, like the full reset above, also needs a fresh
-		 background color sequence appended after it. */
-	      osc->csi_buf[osc->csi_len] = '\0';
+	      /* The CSI sequence is over: 'c' is its final byte. "CSI ? 2048 h/l" (DECSET/DECRST for
+		 in-band resize reporting) is excised outright: it is never meant for our own terminal.
+		 Anything else is flushed verbatim, except for an SGR ("m") sequence that resets the
+		 background, where the fix is patched directly into it (so e.g. a colored prompt followed by
+		 a plain reset keeps a single escape sequence), and a "CSI ! p" soft reset ("DECSTR"), which,
+		 like the full reset above, also needs a fresh background color sequence appended after
+		 it. */
+	      ts->csi_buf[ts->csi_len] = '\0';
 
-	      out[out_len++] = '\x1b';
-	      out[out_len++] = '[';
-	      memcpy(out + out_len, osc->csi_buf, osc->csi_len);
-	      out_len += osc->csi_len;
-
-	      if (c == 'm' && osc->tint_background && is_csi_background_reset_sequence(osc->csi_buf))
+	      if ((c == 'h' || c == 'l') && streq(ts->csi_buf, "?2048"))
 		{
-		  out[out_len++] = ';';
-		  size_t l = strlen(osc->background_color);
-		  memcpy(out + out_len, osc->background_color, l);
-		  out_len += l;
+		  int r = inband_resize_set_enabled(ts, monitor_fd, c == 'h');
+		  if (r < 0)
+		    return r;
+		}
+	      else
+		{
+		  out[out_len++] = '\x1b';
+		  out[out_len++] = '[';
+		  memcpy(out + out_len, ts->csi_buf, ts->csi_len);
+		  out_len += ts->csi_len;
+
+		  if (c == 'm' && ts->tint_background && is_csi_background_reset_sequence(ts->csi_buf))
+		    {
+		      out[out_len++] = ';';
+		      size_t l = strlen(ts->background_color);
+		      memcpy(out + out_len, ts->background_color, l);
+		      out_len += l;
+		    }
+
+		  out[out_len++] = c;
+
+		  if (c == 'p' && ts->tint_background && streq(ts->csi_buf, "!"))
+		    out_len += append_background_tint(ts, out + out_len);
 		}
 
-	      out[out_len++] = c;
-
-	      if (c == 'p' && osc->tint_background && streq(osc->csi_buf, "!"))
-		out_len += append_background_tint(osc, out + out_len);
-
-	      osc->state = OSC_GROUND;
+	      ts->state = OSC_GROUND;
 	    }
 	  break;
 	case OSC_BODY_ESC:
@@ -806,67 +766,65 @@ osc2811_scan(Osc2811Scanner *osc, int monitor_fd, const char *in, size_t n, char
 		 everything seen so far verbatim, and reprocess this byte from scratch. */
 	      out[out_len++] = '\x1b';
 	      out[out_len++] = ']';
-	      memcpy(out + out_len, osc->body, osc->body_len);
-	      out_len += osc->body_len;
-	      osc->state = OSC_GROUND;
+	      memcpy(out + out_len, ts->body, ts->body_len);
+	      out_len += ts->body_len;
+	      ts->state = OSC_GROUND;
 	      i--;
 	      continue;
 	    }
 	  else
 	    {
-	      bool excise;
-	      int r = osc2811_handle_body(osc, monitor_fd, &excise);
-	      if (r < 0)
-		return r;
-	      if (!excise)
+	      /* No OSC sequence is meaningful to us anymore (OSC 2811 support was dropped along with the
+		 rest of UAPI spec 17): pass it through verbatim for a real terminal to (invisibly) deal
+		 with, or excise it otherwise. */
+	      if (ts->pass_through_unknown)
 		{
 		  out[out_len++] = '\x1b';
 		  out[out_len++] = ']';
-		  memcpy(out + out_len, osc->body, osc->body_len);
-		  out_len += osc->body_len;
+		  memcpy(out + out_len, ts->body, ts->body_len);
+		  out_len += ts->body_len;
 		  out[out_len++] = '\x1b';
 		  out[out_len++] = '\\';
 		}
-	      osc->state = OSC_GROUND;
+	      ts->state = OSC_GROUND;
 	    }
 	  break;
 	case OSC_BODY:
 	  if (c == '\x1b')
 	    {
-	      osc->state = OSC_BODY_ESC;
+	      ts->state = OSC_BODY_ESC;
 	      break;
 	    }
 	  if (c == '\a')
 	    {
-	      bool excise;
-	      int r = osc2811_handle_body(osc, monitor_fd, &excise);
-	      if (r < 0)
-		return r;
-	      if (!excise)
+	      if (ts->pass_through_unknown)
 		{
 		  out[out_len++] = '\x1b';
-		out[out_len++] = ']';
-		memcpy(out + out_len, osc->body, osc->body_len);
-                                        out_len += osc->body_len;
-                                        out[out_len++] = '\a';
-                                }
-                                osc->state = OSC_GROUND;
-                        } else if (osc->body_len < sizeof osc->body - 1)
-                                osc->body[osc->body_len++] = c;
-                        else {
-                                /* Way longer than any legitimate OSC 2811 sequence: give up, flush verbatim. */
-                                out[out_len++] = '\x1b';
-                                out[out_len++] = ']';
-                                memcpy(out + out_len, osc->body, osc->body_len);
-                                out_len += osc->body_len;
-                                out[out_len++] = c;
-                                osc->state = OSC_GROUND;
-                        }
-                        break;
-                }
-        }
+		  out[out_len++] = ']';
+		  memcpy(out + out_len, ts->body, ts->body_len);
+		  out_len += ts->body_len;
+		  out[out_len++] = '\a';
+		}
+	      ts->state = OSC_GROUND;
+	    }
+	  else if (ts->body_len < sizeof ts->body - 1)
+	    ts->body[ts->body_len++] = c;
+	  else
+	    {
+	      /* Way longer than any legitimate OSC sequence we'd ever care about: give up, flush
+		 verbatim. */
+	      out[out_len++] = '\x1b';
+	      out[out_len++] = ']';
+	      memcpy(out + out_len, ts->body, ts->body_len);
+	      out_len += ts->body_len;
+	      out[out_len++] = c;
+	      ts->state = OSC_GROUND;
+	    }
+	  break;
+	}
+    }
 
-        return (ssize_t) out_len;
+  return (ssize_t) out_len;
 }
 
 static int
@@ -913,8 +871,8 @@ shall_tint_background(const config_t *cfg)
    closed (i.e. the session ends) *and* (if 'watch' is given and actually watching anything) the backend
    unit has reported its final exit status: the PTY closing and the unit's D-Bus state settling are two
    independent, racy notifications of the same underlying event (the backend process exiting), and the exit
-   status is only available from the latter (see unitwatch.h). Also filters OSC 2811 terminal-size-change
-   traffic out of the monitor connection and replies to it (see osc2811_scan()), reports SIGWINCH-driven
+   status is only available from the latter (see unitwatch.h). Also filters CSI 2048/48 in-band resize
+   traffic out of the monitor connection and replies to it (see terminal_stream_scan()), reports SIGWINCH-driven
    resizes of our own terminal the same way, and, if cfg->background_color is set and shall_tint_background()
    agrees, tints the terminal background with it for the duration of the session. */
 static int
@@ -928,7 +886,7 @@ forward_pty(const config_t *cfg, int monitor_fd, int sigwinch_fd, UnitWatch *wat
   };
 
   bool tint_background = shall_tint_background(cfg);
-  Osc2811Scanner osc = {
+  TerminalScanner ts = {
     .pass_through_unknown = isatty(STDOUT_FILENO),
     .background_color = cfg->background_color,
     .tint_background = tint_background,
@@ -994,7 +952,7 @@ forward_pty(const config_t *cfg, int monitor_fd, int sigwinch_fd, UnitWatch *wat
 	  while (read(pollfds[2].fd, &si, sizeof si) == sizeof si)
 	    ; /* drain; a single fresh TIOCGWINSZ below covers any number of signals */
 
-	  r = osc2811_maybe_report(&osc, monitor_fd);
+	  r = inband_resize_maybe_report(&ts, monitor_fd);
 	  if (r < 0)
 	    fprintf(stderr, "Warning: failed to report terminal size change: %s\n", strerror(-r));
 	}
@@ -1045,11 +1003,11 @@ forward_pty(const config_t *cfg, int monitor_fd, int sigwinch_fd, UnitWatch *wat
 	    }
 	  if (n > 0)
 	    {
-	      /* See osc2811_scan()'s doc comment for why this needs to be this generous when tinting is
+	      /* See terminal_stream_scan()'s doc comment for why this needs to be this generous when tinting is
 		 enabled: worst case, every single byte read is a newline, each of which can grow into a
 		 full SGR sequence re-asserting the background color. */
 	      char filtered[sizeof buf * (BACKGROUND_COLOR_MAX_LEN + 4) + OSC_BODY_MAX + CSI_BODY_MAX];
-	      ssize_t flen = osc2811_scan(&osc, monitor_fd, buf, (size_t) n, filtered);
+	      ssize_t flen = terminal_stream_scan(&ts, monitor_fd, buf, (size_t) n, filtered);
 	      if (flen < 0)
 		return (int) flen;
 
@@ -1130,7 +1088,7 @@ run_pty_session(const config_t *cfg, char **cmdline)
      ended: otherwise the terminal is left painted in the session's background color after the command
      has quit. Resetting the SGR attribute alone is not enough: terminals fill a freshly scrolled-in or
      newline-created row across its *entire* width with whatever background was current at the time (see
-     the tint_background handling of '\n'/'\r' in osc2811_scan()), so the row the next prompt appears on
+     the tint_background handling of '\n'/'\r' in terminal_stream_scan()), so the row the next prompt appears on
      is likely already painted in the tint color before we even get here. Erase it, the same way the
      initial tint is applied with a trailing "\x1b[K" at the start of forward_pty(). */
   if (shall_tint_background(cfg))
